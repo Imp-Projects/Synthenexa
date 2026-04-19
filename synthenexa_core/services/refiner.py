@@ -1,6 +1,5 @@
 from synthenexa_core.models.gemini_client import call_gemini
 
-
 def refine_prompt(old_prompt: str, feedback: str) -> str:
     prompt = f"""
 You are a senior prompt engineering expert for AI code generation systems.
