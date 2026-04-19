@@ -1,5 +1,4 @@
-from models.ollama_client import call_model
-
+from synthenexa_core.models.gemini_client import call_gemini
 
 def refine_prompt(old_prompt, feedback):
     prompt = f"""
@@ -16,4 +15,4 @@ Rewrite the prompt so that the next code generation attempt is more likely to pa
 Return only the improved prompt.
 """
 
-    return call_model("phi3:mini", prompt)
+    return call_gemini(prompt)
