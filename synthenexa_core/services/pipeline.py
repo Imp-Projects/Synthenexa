@@ -1,7 +1,7 @@
 from services.generator import generate_code
 from services.runner import run_code
 from services.evaluator import evaluate_code
-from services.refiner import refine_prompt
+from synthenexa_core.services.refiner_promt import refine_prompt
 from services.classifier import is_code_prompt
 
 

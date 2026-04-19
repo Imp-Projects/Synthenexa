@@ -3,7 +3,7 @@ from pydantic import BaseModel
 
 from synthenexa_core.services.generator import generate_code
 from synthenexa_core.services.evaluator import evaluate_code
-from synthenexa_core.services.refiner import refine_prompt
+from synthenexa_core.services.refiner_promt import refine_prompt
 
 app = FastAPI()
 
