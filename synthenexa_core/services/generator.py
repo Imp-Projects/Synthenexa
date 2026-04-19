@@ -13,26 +13,26 @@ def clean_code(output: str) -> str:
     # fallback cleanup
     return output.strip().replace("```", "")
 
-def generate_code(problem, prompt):
+def generate_code(problem: str, prompt: str) -> str:
     full_prompt = f"""
-You are an expert software engineer.
+You are an expert multi-language software engineer.
 
-You can write code in ANY programming language including:
-Python, Java, JavaScript, C++, Go, etc.
+You write code in ANY language:
+Python, Java, JavaScript, C++, Go, Rust, etc.
 
-Task:
+TASK:
 {prompt}
 
-Problem:
+PROBLEM:
 {problem}
 
-IMPORTANT RULES:
-- Detect the correct programming language from the problem or prompt
-- If language is explicitly mentioned, follow it
+RULES:
+- Detect language automatically from prompt/problem
+- If language is mentioned, strictly follow it
 - Output ONLY code
 - No explanation
 - No markdown
-- Code must be runnable
+- Ensure code is runnable and complete
 """
 
     raw_output = call_gemini(full_prompt)
