@@ -3,15 +3,15 @@ from synthenexa_core.models.gemini_client import call_gemini
 
 def evaluate_code(problem: str, code: str, error: str) -> str:
     prompt = f"""
-You are an expert code reviewer and debugging assistant.
+You are an expert code debugging and review system.
 
-You evaluate code written in ANY programming language:
+You analyze code written in ANY programming language:
 Python, Java, JavaScript, C++, Go, Rust, etc.
 
 ---
 
 TASK:
-Analyze the generated code and execution failure.
+Analyze the code and execution failure.
 
 ---
 
@@ -25,33 +25,28 @@ GENERATED CODE:
 
 ---
 
-EXECUTION ERROR / OUTPUT:
+EXECUTION ERROR:
 {error}
 
 ---
 
-STRICT INSTRUCTIONS:
-- Be precise and technical
-- Assume code may be in any language
-- Do NOT rewrite full code unless necessary
-- Focus on debugging reasoning
-- Identify root cause, not symptoms
+STRICT RULES:
+- Return ONLY valid JSON
+- Do NOT include explanations outside JSON
+- Do NOT include markdown
+- Be precise and structured
+- Keep responses short and technical
 
 ---
 
-RESPOND ONLY IN THIS FORMAT:
+OUTPUT FORMAT (JSON ONLY):
 
-Failure Reason:
-<short root cause>
-
-Bug Explanation:
-<technical explanation of what exactly is wrong>
-
-Missing Logic:
-<what the code failed to handle or implement>
-
-Suggested Fix:
-<high-level fix instructions (not full rewrite unless needed)>
+{{
+  "failure_reason": "string",
+  "bug_explanation": "string",
+  "missing_logic": "string",
+  "suggested_fix": "string"
+}}
 """
 
     return call_gemini(prompt)
