@@ -4,9 +4,13 @@ import re
 import concurrent.futures
 import argparse
 from tqdm import tqdm
+from dotenv import load_dotenv
 
 
-from utils.ollama_client import call_model
+from utils.ollama_client import call_model, get_default_model
+from utils.paths import resolve_pipeline_path
+
+load_dotenv()
 
 PROMPT_TEMPLATE = """
 You are an expert in software engineering.
@@ -27,11 +31,8 @@ Return output EXACTLY in this format:
 """
 
 
-def gen_answer():
-    response = call_model("qwen2.5:3b", PROMPT_TEMPLATE)
-    if isinstance(response, dict):
-        return response.get("response", "")
-    return str(response)
+def gen_answer(model):
+    return call_model(model, PROMPT_TEMPLATE)
 
 
 def extract_wrapped_content(text):
@@ -47,20 +48,21 @@ def extract_wrapped_content(text):
         return None
 
 
-def process_task(task_id):
+def process_task(task_id, model):
     while True:
-        completion = gen_answer()
+        completion = gen_answer(model)
         parsed = extract_wrapped_content(completion)
         if parsed:
             return parsed
         print(f"Retrying task {task_id}...")
 
 
-def main(output_path, total_tasks=10):
+def main(output_path, total_tasks=10, model=None):
     samples = []
+    selected_model = model or get_default_model()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-        futures = [executor.submit(process_task, i) for i in range(total_tasks)]
+        futures = [executor.submit(process_task, i, selected_model) for i in range(total_tasks)]
 
         for future in tqdm(
             concurrent.futures.as_completed(futures),
@@ -84,9 +86,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--output_path", required=True)
     parser.add_argument("--total_tasks", type=int, default=10)
+    parser.add_argument("--model", default=None)
     args = parser.parse_args()
 
-    main(args.output_path, args.total_tasks)
+    out = str(resolve_pipeline_path(args.output_path))
+    main(out, args.total_tasks, args.model)
 
 def validate_sample(sample):
     required_keys = {

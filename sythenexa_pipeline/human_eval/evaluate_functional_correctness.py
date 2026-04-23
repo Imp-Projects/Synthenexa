@@ -16,7 +16,11 @@ def entry_point(
     Evaluates the functional correctness of generated samples, and writes
     results to f"{sample_file}_results.jsonl.gz"
     """
-    k = list(map(int, k.split(",")))
+    # Handle both string and tuple inputs for k (fire.Fire converts comma-separated to tuple)
+    if isinstance(k, (list, tuple)):
+        k = list(map(int, k))
+    else:
+        k = list(map(int, k.split(",")))
     results = evaluate_functional_correctness(sample_file, k, n_workers, timeout, problem_file)
     print(results)
 

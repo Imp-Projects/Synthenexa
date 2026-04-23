@@ -3,9 +3,16 @@ import subprocess
 import re
 import json
 import argparse
+import sys
+
+from utils.paths import pipeline_root, resolve_pipeline_path
 
 # Define a function to evaluate functional correctness
 def evaluate_functional_correctness(evaluate_path, problem_file_path, prompts_file_path, best_prompt_output_path):
+    evaluate_path = str(resolve_pipeline_path(evaluate_path))
+    problem_file_path = str(resolve_pipeline_path(problem_file_path))
+    prompts_file_path = str(resolve_pipeline_path(prompts_file_path))
+    best_prompt_output_path = str(resolve_pipeline_path(best_prompt_output_path))
     # Used to store the correct result count for each task_id
     task_correct_counts = {}
 
@@ -21,10 +28,16 @@ def evaluate_functional_correctness(evaluate_path, problem_file_path, prompts_fi
 
             # Check if results.jsonl file exists, if not, run the script to generate it
             if not os.path.exists(result_file_path):
-                base_command = f"evaluate_functional_correctness {jsonl_file_path} --problem_file={problem_file_path}"
+                eval_script = pipeline_root() / "human_eval" / "evaluate_functional_correctness.py"
+                cmd = [
+                    sys.executable,
+                    str(eval_script),
+                    jsonl_file_path,
+                    f"--problem_file={problem_file_path}",
+                ]
                 try:
                     print(f"Generating results for {filename}...")
-                    subprocess.run(base_command, shell=True, check=True)
+                    subprocess.run(cmd, check=True, cwd=str(pipeline_root()))
                 except subprocess.CalledProcessError as e:
                     print(f"Command failed: {e}\n{e.output}")
                     continue  # Skip this file if generation fails

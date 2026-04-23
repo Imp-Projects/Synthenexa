@@ -2,6 +2,8 @@ import json
 import random
 import argparse
 
+from utils.paths import resolve_pipeline_path
+
 
 # Function to handle the logic of randomly sampling data
 def sample_jsonl(input_path, output_path, sample_size=10):
@@ -33,7 +35,11 @@ def main():
     args = parser.parse_args()
 
     # Call the function to execute the sampling logic
-    sample_jsonl(args.input, args.output, args.sample_size)
+    sample_jsonl(
+        str(resolve_pipeline_path(args.input)),
+        str(resolve_pipeline_path(args.output)),
+        args.sample_size,
+    )
 
 
 if __name__ == "__main__":

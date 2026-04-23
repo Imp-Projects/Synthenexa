@@ -6,16 +6,11 @@ import subprocess
 import concurrent.futures
 from tqdm import tqdm
 from evalplus.data import write_jsonl
-from openai import OpenAI
 from dotenv import load_dotenv
+from utils.ollama_client import call_model, get_default_model
+from utils.paths import resolve_pipeline_path
 
 load_dotenv()
-
-# Set API Key
-client = OpenAI(
-    base_url=os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1"),
-    api_key=os.getenv("OPENAI_API_KEY"),
-)
 
 # Task description and information used for generating optimized prompts
 task_describe = """
@@ -35,14 +30,11 @@ Ensure that the optimized prompt includes a detailed task description and clear 
 Wrap the optimized prompt in {{}}.
 """
 
-def GEN_SOLUTION(task_describe, prompt):
-    return """
-def solution(x):
-    return x
-""" 
+def GEN_SOLUTION(task_describe, prompt, model):
+    return call_model(model, f"{task_describe}\n\n{prompt}")
 # Process task
-def process_task(task_id, task_describe, prompt):
-    completion = GEN_SOLUTION(task_describe, prompt)
+def process_task(task_id, task_describe, prompt, model):
+    completion = GEN_SOLUTION(task_describe, prompt, model)
     return dict(task_id=task_id, completion=completion)
 
 # Read JSONL file
@@ -52,7 +44,7 @@ def read_jsonl(file_path):
             yield json.loads(line)
 
 # Generate solutions and save to the specified directory
-def generate_solutions(test_set_path, mutated_prompt_path, output_directory):
+def generate_solutions(test_set_path, mutated_prompt_path, output_directory, model):
     os.makedirs(output_directory, exist_ok=True)
 
     mutated_prompts = {task["prompt_id"]: task["mutated_prompt"] for task in read_jsonl(mutated_prompt_path)}
@@ -66,7 +58,8 @@ def generate_solutions(test_set_path, mutated_prompt_path, output_directory):
                     process_task,
                     task["task_id"],
                     task_describe,
-                    task["prompt"]
+                    task["prompt"],
+                    model,
                 )
                 for task in read_jsonl(test_set_path)
             ]
@@ -79,8 +72,8 @@ def generate_solutions(test_set_path, mutated_prompt_path, output_directory):
                 else:
                     print(f"No valid completion for task_id: {result['task_id']} with prompt_id: {prompt_id}")
 
-        # Train set name
-        output_file = os.path.join(output_directory, f"train_set_gpt3.5turbo_{prompt_id}.jsonl")
+        model_slug = model.replace(":", "_").replace("/", "_")
+        output_file = os.path.join(output_directory, f"train_set_{model_slug}_{prompt_id}.jsonl")
         write_jsonl(output_file, samples)
 
 def evaluate_and_select_best_prompts(folder_path, problem_file_path, prompts_file_path, best_prompt_output_path):
@@ -104,8 +97,12 @@ def evaluate_and_select_best_prompts(folder_path, problem_file_path, prompts_fil
     print("Best prompt selected (mock).")
 
 # Generate optimized prompts
-def GEN_ANSWER(prompt):
-    return "{{Write a clear Python function to solve the problem described in natural language.}}"
+def GEN_ANSWER(prompt, model):
+    optimize_prompt = (
+        task_describe + information + prompt + format +
+        "\nReturn only the optimized prompt wrapped in double braces like {{...}}."
+    )
+    return call_model(model, optimize_prompt)
 
 def extract_wrapped_content(text):
     match = re.search(r'\{\{(.*?)\}\}', text, re.DOTALL)
@@ -114,16 +111,16 @@ def extract_wrapped_content(text):
     else:
         return ""
 
-def process_optimization_task(task_id, prompt):
+def process_optimization_task(task_id, prompt, model):
     while True:
-        completion = GEN_ANSWER(prompt)
+        completion = GEN_ANSWER(prompt, model)
         wrapped_content = extract_wrapped_content(completion)
         if wrapped_content:
             return dict(prompt_id=task_id, mutated_prompt=wrapped_content)
         else:
             print(f"Task {task_id}: No wrapped content found. Retrying...")
 
-def generate_new_prompts(existing_prompts):
+def generate_new_prompts(existing_prompts, model):
     new_prompts = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = []
@@ -131,14 +128,14 @@ def generate_new_prompts(existing_prompts):
             random_prompt = random.choice(existing_prompts)
             prompt_text = random_prompt['mutated_prompt']
             formatted_prompt = f"The prompt ready to be optimized are as follows and wrapped in []:\n[{prompt_text}]\n"
-            futures.append(executor.submit(process_optimization_task, task_id, formatted_prompt))
+            futures.append(executor.submit(process_optimization_task, task_id, formatted_prompt, model))
 
         for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc="Processing tasks"):
             new_prompts.append(future.result())
 
     return new_prompts
 
-def optimize_prompts(input_file, output_file):
+def optimize_prompts(input_file, output_file, model):
     if not os.path.exists(input_file):
         print(f"Input file {input_file} does not exist.")
         return
@@ -146,7 +143,7 @@ def optimize_prompts(input_file, output_file):
     with open(input_file, 'r') as file:
         prompts = [json.loads(line) for line in file]
 
-    new_prompts = generate_new_prompts(prompts)
+    new_prompts = generate_new_prompts(prompts, model)
 
     existing_ids = {prompt['prompt_id'] for prompt in prompts}
     new_id = 0
@@ -168,17 +165,24 @@ def optimize_prompts(input_file, output_file):
 
 # Main program entry point
 if __name__ == "__main__":
-    
-    test_set_path = "data/train_set.jsonl"
-    mutated_prompt_path = "data/mutated_prompts.jsonl"
-    output_directory = "data/evaluation_output"
+    model = get_default_model()
 
-    generate_solutions(test_set_path, mutated_prompt_path, output_directory)
+    test_set_path = str(
+        resolve_pipeline_path(os.getenv("PIPELINE_TRAINSET_PATH", "Dataset/train_set.jsonl"))
+    )
+    mutated_prompt_path = str(
+        resolve_pipeline_path(os.getenv("PIPELINE_MUTATED_PROMPT_PATH", "Dataset/mutated_prompts.jsonl"))
+    )
+    output_directory = str(
+        resolve_pipeline_path(os.getenv("PIPELINE_EVAL_OUTPUT_DIR", "Dataset/evaluation_output"))
+    )
 
-    folder_path = "data/evaluation_output"
-    problem_file_path = "data/train_set.jsonl"
-    prompts_file_path = "data/mutated_prompts.jsonl"
-    best_prompt_output_path = "data/best_prompt.jsonl"
+    generate_solutions(test_set_path, mutated_prompt_path, output_directory, model)
+
+    folder_path = output_directory
+    problem_file_path = test_set_path
+    prompts_file_path = mutated_prompt_path
+    best_prompt_output_path = str(resolve_pipeline_path("Dataset/best_prompt.jsonl"))
 
     evaluate_and_select_best_prompts(
         folder_path,
@@ -188,6 +192,6 @@ if __name__ == "__main__":
     )
 
     optimize_input_file = best_prompt_output_path
-    optimize_output_file = "data/optimized_prompts.jsonl"
+    optimize_output_file = str(resolve_pipeline_path("Dataset/optimized_prompts.jsonl"))
 
-    optimize_prompts(optimize_input_file, optimize_output_file)
+    optimize_prompts(optimize_input_file, optimize_output_file, model)

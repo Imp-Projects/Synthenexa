@@ -9,6 +9,8 @@ from openai import OpenAI
 import argparse 
 from dotenv import load_dotenv
 
+from utils.paths import resolve_pipeline_path
+
 load_dotenv()
 
 # Set API Key
@@ -139,4 +141,7 @@ if __name__ == "__main__":
     parser.add_argument('--prompt_file', type=str, required=True, help="Path to the jsonl file containing prompt templates.")
     args = parser.parse_args()
 
-    main(args.output_path, args.prompt_file)
+    main(
+        str(resolve_pipeline_path(args.output_path)),
+        str(resolve_pipeline_path(args.prompt_file)),
+    )

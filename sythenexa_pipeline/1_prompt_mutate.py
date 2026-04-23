@@ -7,6 +7,8 @@ import argparse
 import random
 from evalplus.data import write_jsonl
 from dotenv import load_dotenv
+from utils.ollama_client import call_model, get_default_model
+from utils.paths import resolve_pipeline_path
 
 load_dotenv()
 
@@ -25,13 +27,15 @@ Wrap the optimized prompt in {{}}.
 """
 
 
-# MOCK MODEL RESPONSE (no API call)
 def GEN_ANSWER(prompt, model):
-    return "{{mock prompt}}", 0
+    full_prompt = task_describe + information + prompt + format
+    return call_model(model, full_prompt), 0
 
 
 # Extract {{prompt}}
 def extract_wrapped_content(text):
+    if not text or not isinstance(text, str):
+        return None
     match = re.search(r"\{\{(.*?)\}\}", text, re.DOTALL)
     if match:
         return match.group(1).strip()
@@ -41,9 +45,14 @@ def extract_wrapped_content(text):
 def process_task(task_id, prompt, model):
     total_tokens = 0
 
-    for _ in range(3):  # prevent infinite loops
+    for attempt in range(3):  # prevent infinite loops
         completion, tokens_used = GEN_ANSWER(prompt, model)
         total_tokens += tokens_used
+
+        # Handle None responses
+        if completion is None:
+            print(f"  Attempt {attempt + 1}/3 failed for task {task_id}")
+            continue
 
         wrapped_content = extract_wrapped_content(completion)
 
@@ -53,6 +62,7 @@ def process_task(task_id, prompt, model):
                 "mutated_prompt": wrapped_content
             }, total_tokens
 
+    print(f"⚠️  Task {task_id} exhausted all attempts, skipping...")
     return None, total_tokens
 
 
@@ -61,7 +71,8 @@ def read_jsonl(file_path):
         return [json.loads(line) for line in f]
 
 
-def main(model, prompt_path, output_path):
+def main(model, prompt_path, output_path, num_mutations=10):
+    model = model or get_default_model()
 
     data = read_jsonl(prompt_path)
     random_entry = random.choice(data)
@@ -72,7 +83,7 @@ def main(model, prompt_path, output_path):
     samples = []
     total_tokens = 0
 
-    problems = {i: {"prompt": prompt} for i in range(10)}
+    problems = {i: {"prompt": prompt} for i in range(num_mutations)}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
 
@@ -103,10 +114,16 @@ def main(model, prompt_path, output_path):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--model", default=None)
     parser.add_argument("--prompt_path", required=True)
     parser.add_argument("--output_path", required=True)
+    parser.add_argument("--num_mutations", type=int, default=10)
 
     args = parser.parse_args()
 
-    main(args.model, args.prompt_path, args.output_path)
+    main(
+        args.model,
+        str(resolve_pipeline_path(args.prompt_path)),
+        str(resolve_pipeline_path(args.output_path)),
+        args.num_mutations,
+    )

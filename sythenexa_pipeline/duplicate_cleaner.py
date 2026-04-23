@@ -1,6 +1,8 @@
 import json
 from random import sample
 
+from utils.paths import resolve_pipeline_path
+
 
 def clean_dataset(input_file, output_file):
     seen_prompts = set()
@@ -49,6 +51,6 @@ def clean_dataset(input_file, output_file):
 
 if __name__ == "__main__":
     clean_dataset(
-        "Dataset/generated.jsonl",
-        "Dataset/clean_generated.jsonl"
+        str(resolve_pipeline_path("Dataset/generated.jsonl")),
+        str(resolve_pipeline_path("Dataset/clean_generated.jsonl")),
     )
