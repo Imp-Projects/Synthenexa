@@ -16,9 +16,19 @@ def GEN_SOLUTION(task_describe, prompt, model):
     return call_model(model, f"{task_describe}\n\n{prompt}"), 0
 
 
+def _sanitize_completion(text):
+    if not text:
+        return text
+    # Prefer fenced code blocks if present.
+    blocks = re.findall(r"```(?:python)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+    if blocks:
+        return max(blocks, key=lambda b: len(b.strip())).strip()
+    return text.strip()
+
+
 def process_task(task_id, task_describe, prompt, model):
     completion, tokens_used = GEN_SOLUTION(task_describe, prompt, model)
-    return dict(task_id=task_id, completion=completion), tokens_used
+    return dict(task_id=task_id, completion=_sanitize_completion(completion)), tokens_used
 
 
 def read_jsonl(file_path):
@@ -33,13 +43,22 @@ def main(model, testset_path, mutated_prompt_path, output_path):
     tasks = list(read_jsonl(testset_path))
     os.makedirs(output_path, exist_ok=True)
 
-    # Read mutated prompt file
-    mutated_prompts = {task["prompt_id"]: task["mutated_prompt"] for task in read_jsonl(mutated_prompt_path)}
+    tasks_by_id = {task.get("task_id"): task for task in tasks}
+    mutated_prompt_rows = list(read_jsonl(mutated_prompt_path))
 
     total_tokens = 0  # Initialize total tokens counter
 
-    for prompt_id, task_describe in mutated_prompts.items():
+    for row in mutated_prompt_rows:
+        prompt_id = row["prompt_id"]
+        task_describe = row["mutated_prompt"]
+        source_task_id = row.get("source_task_id")
         samples = []
+
+        # Task-aware evaluation: if mutation is tied to a source task, only evaluate on that task.
+        # Fallback to full-set behavior for legacy rows without source_task_id.
+        evaluation_tasks = tasks
+        if source_task_id and source_task_id in tasks_by_id:
+            evaluation_tasks = [tasks_by_id[source_task_id]]
 
         # Use multithreading to speed up task processing
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -51,7 +70,7 @@ def main(model, testset_path, mutated_prompt_path, output_path):
                     task.get("prompt", ""),
                     model,
                 )
-                for task in tasks
+                for task in evaluation_tasks
             ]
 
             for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures),

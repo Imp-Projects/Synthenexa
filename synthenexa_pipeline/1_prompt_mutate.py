@@ -4,7 +4,6 @@ import re
 import concurrent.futures
 from tqdm import tqdm
 import argparse
-import random
 from evalplus.data import write_jsonl
 from dotenv import load_dotenv
 from utils.ollama_client import call_model, get_default_model
@@ -42,7 +41,7 @@ def extract_wrapped_content(text):
     return None
 
 
-def process_task(task_id, prompt, model):
+def process_task(task_id, source_task_id, prompt, model):
     total_tokens = 0
 
     for attempt in range(3):  # prevent infinite loops
@@ -59,6 +58,7 @@ def process_task(task_id, prompt, model):
         if wrapped_content:
             return {
                 "prompt_id": task_id,
+                "source_task_id": source_task_id,
                 "mutated_prompt": wrapped_content
             }, total_tokens
 
@@ -75,21 +75,32 @@ def main(model, prompt_path, output_path, num_mutations=10):
     model = model or get_default_model()
 
     data = read_jsonl(prompt_path)
-    random_entry = random.choice(data)
-
-    # fallback if field not present
-    prompt = random_entry.get("mutated_prompt", random_entry.get("prompt", ""))
+    if not data:
+        raise ValueError(f"No prompts found in {prompt_path}")
 
     samples = []
     total_tokens = 0
 
-    problems = {i: {"prompt": prompt} for i in range(num_mutations)}
+    # Task-aware / prompt-group mutation:
+    # build mutation jobs from multiple source tasks (not a single global prompt).
+    jobs = []
+    for entry in data:
+        source_task_id = entry.get("task_id")
+        source_prompt = entry.get("mutated_prompt", entry.get("prompt", ""))
+        if not source_prompt:
+            continue
+        jobs.append((source_task_id, source_prompt))
+        if len(jobs) >= num_mutations:
+            break
+
+    if not jobs:
+        raise ValueError("No valid prompts available for mutation.")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
 
         futures = [
-            executor.submit(process_task, task_id, problem["prompt"], model)
-            for task_id, problem in problems.items()
+            executor.submit(process_task, idx, source_task_id, source_prompt, model)
+            for idx, (source_task_id, source_prompt) in enumerate(jobs)
         ]
 
         for future in tqdm(
