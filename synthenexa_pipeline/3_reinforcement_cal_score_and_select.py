@@ -4,8 +4,36 @@ import re
 import json
 import argparse
 import sys
+import tempfile
 
 from utils.paths import pipeline_root, resolve_pipeline_path
+
+
+def _build_subset_problem_file(sample_file_path, problem_file_path):
+    sample_task_ids = set()
+    with open(sample_file_path, "r", encoding="utf-8") as sf:
+        for line in sf:
+            if not line.strip():
+                continue
+            try:
+                sample_task_ids.add(json.loads(line).get("task_id"))
+            except json.JSONDecodeError:
+                continue
+
+    fd, subset_path = tempfile.mkstemp(prefix="subset_problem_", suffix=".jsonl")
+    os.close(fd)
+    with open(problem_file_path, "r", encoding="utf-8") as pf, open(subset_path, "w", encoding="utf-8") as out:
+        for line in pf:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("task_id") in sample_task_ids:
+                out.write(json.dumps(row) + "\n")
+    return subset_path
+
 
 # Define a function to evaluate functional correctness
 def evaluate_functional_correctness(evaluate_path, problem_file_path, prompts_file_path, best_prompt_output_path):
@@ -33,14 +61,20 @@ def evaluate_functional_correctness(evaluate_path, problem_file_path, prompts_fi
                     sys.executable,
                     str(eval_script),
                     jsonl_file_path,
-                    f"--problem_file={problem_file_path}",
                 ]
+                subset_problem_file = _build_subset_problem_file(jsonl_file_path, problem_file_path)
+                cmd.append(f"--problem_file={subset_problem_file}")
                 try:
                     print(f"Generating results for {filename}...")
                     subprocess.run(cmd, check=True, cwd=str(pipeline_root()))
                 except subprocess.CalledProcessError as e:
                     print(f"Command failed: {e}\n{e.output}")
                     continue  # Skip this file if generation fails
+                finally:
+                    try:
+                        os.remove(subset_problem_file)
+                    except OSError:
+                        pass
 
             # Read the generated results.jsonl file and calculate correct counts for each task_id
             if os.path.exists(result_file_path):
@@ -125,7 +159,12 @@ def evaluate_functional_correctness(evaluate_path, problem_file_path, prompts_fi
             with open(best_prompt_output_path, 'w') as best_prompt_file:
                 for line in prompts_file:
                     prompt_data = json.loads(line)
-                    if prompt_data.get('prompt_id') in best_prompt_ids:
+                    p_id = prompt_data.get('prompt_id')
+                    if p_id in best_prompt_ids:
+                        # Add scores to the data before writing
+                        if p_id in prompt_scores:
+                            prompt_data['original_score'] = prompt_scores[p_id]['original_score']
+                            prompt_data['weighted_score'] = prompt_scores[p_id]['weighted_score']
                         best_prompt_file.write(json.dumps(prompt_data) + '\n')
 
     print(f'Best prompts saved to {best_prompt_output_path} with prompt_ids: {best_prompt_ids} and max weighted score: {max_weighted_score}')
