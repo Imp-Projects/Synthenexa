@@ -1,13 +1,14 @@
-Relative paths that start with **`Dataset/`** are written under **`sythenexa_pipeline/Dataset/`**, not the repository root, so you can run commands from the repo root without splitting outputs across two folders.
+Relative paths that start with **`Dataset/`** are written under **`synthenexa_pipeline/Dataset/`**, not the repository root, so you can run commands from the repo root without splitting outputs across two folders.
 
 ## Phase 1: Generate Training Set
 
 ### Step 1.1: Generate Initial Training Set (HumanEval-style problems)
 
 ```bash
-python sythenexa_pipeline/0_train_set_generate.py \
+python synthenexa_pipeline/0_train_set_generate.py \
   --output_path Dataset/train_set.jsonl \
-  --total_tasks 100
+  --total_tasks 100 \
+  --model groq:llama-3.1-8b-instant
 ```
 
 **Output**: `Dataset/train_set.jsonl`
@@ -16,8 +17,8 @@ python sythenexa_pipeline/0_train_set_generate.py \
 ### Step 1.2: Validate & Clean Training Set
 
 ```bash
-python sythenexa_pipeline/0_train_set_select.py \
-  --input_path Dataset/train_set.jsonl \
+python synthenexa_pipeline/0_train_set_select.py \
+  --input Dataset/train_set.jsonl \
   --output_path Dataset/selected_promts.jsonl
 ```
 
@@ -29,22 +30,22 @@ python sythenexa_pipeline/0_train_set_select.py \
 ### Step 2.1: Mutate Prompts (Generate variations)
 
 ```bash
-python sythenexa_pipeline/1_prompt_mutate.py \
-  --model=gemini-2.5-flash \
+python synthenexa_pipeline/1_prompt_mutate.py \
+  --model groq:llama-3.1-8b-instant \
   --prompt_path Dataset/selected_promts.jsonl \
   --output_path Dataset/mutated_prmts.jsonl
 ```
 
 **Output**: `Dataset/mutated_prmts.jsonl`
 - Contains mutated (improved) prompts from the original ones
-- Falls back to Ollama if Gemini quota exceeded
+- Falls back to Ollama if Groq is unavailable or request fails
 
 ### Step 2.2: Evaluate Mutated Prompts (Generate solutions with each prompt)
 
-**Option A: Use Gemini (with Ollama fallback)**
+**Option A: Use Groq (with Ollama fallback)**
 ```bash
-python sythenexa_pipeline/2_prompt_evaluate.py \
-  --model gemini-2.5-flash \
+python synthenexa_pipeline/2_prompt_evaluate.py \
+  --model groq:llama-3.1-8b-instant \
   --trainset_path Dataset/train_set.jsonl \
   --mutated_prompt_path Dataset/mutated_prmts.jsonl \
   --output_path Dataset/evaluatedprmts
@@ -56,20 +57,20 @@ python sythenexa_pipeline/2_prompt_evaluate.py \
 ollama serve
 
 # In another terminal:
-SKIP_GEMINI=1 python sythenexa_pipeline/2_prompt_evaluate.py \
-  --model gemini-2.5-flash \
+python synthenexa_pipeline/2_prompt_evaluate.py \
+  --model ollama:qwen:latest \
   --trainset_path Dataset/train_set.jsonl \
   --mutated_prompt_path Dataset/mutated_prmts.jsonl \
   --output_path Dataset/evaluatedprmts
 ```
 
-**Output**: `Dataset/evaluatedprmts/train_set_gemini-2.5-flash_*.jsonl`
+**Output**: `Dataset/evaluatedprmts/train_set_<model>_*.jsonl`
 - Solutions generated using each mutated prompt
 - One file per mutated prompt
 
 **Files produced**:
-- `Dataset/evaluatedprmts/train_set_gemini-2.5-flash_0.jsonl` (solutions for prompt_id 0)
-- `Dataset/evaluatedprmts/train_set_gemini-2.5-flash_1.jsonl` (solutions for prompt_id 1)
+- `Dataset/evaluatedprmts/train_set_groq_llama-3.1-8b-instant_0.jsonl` (solutions for prompt_id 0)
+- `Dataset/evaluatedprmts/train_set_groq_llama-3.1-8b-instant_1.jsonl` (solutions for prompt_id 1)
 - ... (one for each mutated prompt)
 
 ---
@@ -81,13 +82,13 @@ SKIP_GEMINI=1 python sythenexa_pipeline/2_prompt_evaluate.py \
 For each generated solution file:
 
 ```bash
-python sythenexa_pipeline/human_eval/evaluate_functional_correctness.py \
-  --sample_file Dataset/evaluatedprmts/train_set_gemini-2.5-flash_0.jsonl \
+python synthenexa_pipeline/human_eval/evaluate_functional_correctness.py \
+  Dataset/evaluatedprmts/train_set_groq_llama-3.1-8b-instant_0.jsonl \
   --k "1,10,100" \
   --timeout 3.0
 ```
 
-**Output**: `Dataset/evaluatedprmts/train_set_gemini-2.5-flash_0.jsonl_results.jsonl.gz`
+**Output**: `Dataset/evaluatedprmts/train_set_groq_llama-3.1-8b-instant_0.jsonl_results.jsonl.gz`
 - Pass@1, pass@10, pass@100 metrics for each prompt
 
 ---
@@ -95,9 +96,11 @@ python sythenexa_pipeline/human_eval/evaluate_functional_correctness.py \
 ### Step 3.2: Calculate Scores & Select Best Prompt
 
 ```bash
-python sythenexa_pipeline/3_cal_score_and_extract_best_prompt.py \
-  --eval_results_folder Dataset/evaluatedprmts \
-  --output_path Dataset/best_prompts.jsonl
+python synthenexa_pipeline/3_reinforcement_cal_score_and_select.py \
+  --evaluate_path Dataset/evaluatedprmts \
+  --testset_path Dataset/train_set.jsonl \
+  --origin_prompt Dataset/mutated_prmts.jsonl \
+  --best_prompt Dataset/best_prompts.jsonl
 ```
 
 **Output**: `Dataset/best_prompts.jsonl`
@@ -111,7 +114,7 @@ python sythenexa_pipeline/3_cal_score_and_extract_best_prompt.py \
 ### Step 4.1: Run Full Reinforcement Loop (Steps 2-3 combined)
 
 ```bash
-python sythenexa_pipeline/2+3+4_reinfocement.py
+python synthenexa_pipeline/2+3+4_reinfocement.py
 ```
 
 **This file:**
@@ -191,16 +194,16 @@ Dataset/
 
 ```bash
 # Generate training set
-python sythenexa_pipeline/0_train_set_generate.py --output_path Dataset/train_set.jsonl --total_tasks 100
+python synthenexa_pipeline/0_train_set_generate.py --output_path Dataset/train_set.jsonl --total_tasks 100 --model groq:llama-3.1-8b-instant
 
 # Clean & select
-python sythenexa_pipeline/0_train_set_select.py --input Dataset/train_set.jsonl --output Dataset/selected_promts.jsonl
+python synthenexa_pipeline/0_train_set_select.py --input Dataset/train_set.jsonl --output Dataset/selected_promts.jsonl
 
 # Mutate prompts
-python sythenexa_pipeline/1_prompt_mutate.py --model=gemini-2.5-flash --prompt_path Dataset/selected_promts.jsonl --output_path Dataset/mutated_prmts.jsonl
+python synthenexa_pipeline/1_prompt_mutate.py --model groq:llama-3.1-8b-instant --prompt_path Dataset/selected_promts.jsonl --output_path Dataset/mutated_prmts.jsonl
 
 # Evaluate with mutated prompts
-python sythenexa_pipeline/2_prompt_evaluate.py --model gemini-2.5-flash --trainset_path Dataset/train_set.jsonl --mutated_prompt_path Dataset/mutated_prmts.jsonl --output_path Dataset/evaluatedprmts
+python synthenexa_pipeline/2_prompt_evaluate.py --model groq:llama-3.1-8b-instant --trainset_path Dataset/train_set.jsonl --mutated_prompt_path Dataset/mutated_prmts.jsonl --output_path Dataset/evaluatedprmts
 
 # Score & select best
 # (First run HumanEval for each output file, then run step 3 script)
@@ -210,9 +213,8 @@ python sythenexa_pipeline/2_prompt_evaluate.py --model gemini-2.5-flash --trains
 
 ## Notes
 
-- **Gemini Quota**: Free tier = 5 requests/minute. After exceeding quota:
-  - Use `SKIP_GEMINI=1` to use Ollama only (recommended when quota exceeded)
-  - Wait ~24 hours for quota to reset
+- **Groq limits**: If Groq throttles/fails, requests automatically fall back to Ollama.
+- You can force Ollama by setting model as `ollama:<ollama_model_name>`.
   
 - **Ollama**: Make sure it's running in another terminal:
   ```bash
