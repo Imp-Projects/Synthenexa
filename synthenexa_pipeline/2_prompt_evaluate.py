@@ -3,8 +3,8 @@ import os
 import re
 import argparse
 import concurrent.futures
+import json
 from tqdm import tqdm
-from evalplus.data import write_jsonl
 from dotenv import load_dotenv
 from utils.ollama_client import call_model, get_default_model
 from utils.paths import resolve_pipeline_path
@@ -30,6 +30,10 @@ def process_task(task_id, task_describe, prompt, model):
     completion, tokens_used = GEN_SOLUTION(task_describe, prompt, model)
     return dict(task_id=task_id, completion=_sanitize_completion(completion)), tokens_used
 
+def write_jsonl(path, data):
+    with open(path, "w") as f:
+        for item in data:
+            f.write(json.dumps(item) + "\n")
 
 def read_jsonl(file_path):
     with open(file_path, 'r') as file:
