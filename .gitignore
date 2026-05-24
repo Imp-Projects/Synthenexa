@@ -16,6 +16,6 @@ data/
 Thumbs.db
 
 # Phase 3 generated datasets
-core-pipeline/Dataset/*.jsonl
-core-pipeline/Dataset/*.json
-core-pipeline/Dataset/temp/
+synthenexa-pipeline/Dataset/*.jsonl
+synthenexa-pipeline/Dataset/*.json
+synthenexa-pipeline/Dataset/temp/
