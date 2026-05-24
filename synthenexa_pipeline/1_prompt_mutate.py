@@ -2,9 +2,9 @@ import os
 import json
 import re
 import concurrent.futures
+import json
 from tqdm import tqdm
 import argparse
-from evalplus.data import write_jsonl
 from dotenv import load_dotenv
 from utils.ollama_client import call_model, get_default_model
 from utils.paths import resolve_pipeline_path
@@ -65,6 +65,10 @@ def process_task(task_id, source_task_id, prompt, model):
     print(f"⚠️  Task {task_id} exhausted all attempts, skipping...")
     return None, total_tokens
 
+def write_jsonl(path, data):
+    with open(path, "w") as f:
+        for item in data:
+            f.write(json.dumps(item) + "\n")
 
 def read_jsonl(file_path):
     with open(file_path, "r") as f:
