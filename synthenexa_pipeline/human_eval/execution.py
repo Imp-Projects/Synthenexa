@@ -9,6 +9,8 @@ import platform
 import signal
 import tempfile
 
+print("DEBUG: human_eval/execution.py loaded")
+
 
 def check_correctness(problem: Dict, completion: str, timeout: float,
                       completion_id: Optional[int] = None) -> Dict:
@@ -38,7 +40,7 @@ def check_correctness(problem: Dict, completion: str, timeout: float,
             check_program = (
                 # humaneval
                 # 'from typing import List\n' +
-                problem["prompt"] + completion + "\n" +
+                problem["prompt"] + "\n" + completion + "\n" +
                 problem["test"] + "\n" +
                 f"check({problem['entry_point']})"
 
@@ -62,7 +64,7 @@ def check_correctness(problem: Dict, completion: str, timeout: float,
 # information on how OpenAI sandboxes its code, see the accompanying paper.
 # Once you have read this disclaimer and taken appropriate precautions, 
 # uncomment the following line and proceed at your own risk:
-#                         exec(check_program, exec_globals)
+                        exec(check_program, exec_globals)
                         result.append("passed")
             except TimeoutException:
                 result.append("timed out")
@@ -96,6 +98,10 @@ def check_correctness(problem: Dict, completion: str, timeout: float,
 
 @contextlib.contextmanager
 def time_limit(seconds: float):
+    if platform.system() == "Windows":
+        yield
+        return
+
     def signal_handler(signum, frame):
         raise TimeoutException("Timed out!")
     signal.setitimer(signal.ITIMER_REAL, seconds)
@@ -175,7 +181,7 @@ def reliability_guard(maximum_memory_bytes: Optional[int] = None):
     with caution.
     """
 
-    if maximum_memory_bytes is not None:
+    if maximum_memory_bytes is not None and platform.system() != "Windows":
         import resource
         resource.setrlimit(resource.RLIMIT_AS, (maximum_memory_bytes, maximum_memory_bytes))
         resource.setrlimit(resource.RLIMIT_DATA, (maximum_memory_bytes, maximum_memory_bytes))
