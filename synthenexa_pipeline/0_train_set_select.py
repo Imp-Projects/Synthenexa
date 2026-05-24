@@ -28,8 +28,8 @@ def main():
 
     # Add input and output file path arguments
     parser.add_argument('--input', type=str, required=True, help="Path to the input jsonl file")
-    parser.add_argument('--output', type=str, required=True, help="Path to the output file")
-    parser.add_argument('--sample_size', type=int, default=10, help="Number of random samples to select, default is 10")
+    parser.add_argument('--output_path', type=str, required=True, help="Path to the output file")
+    parser.add_argument('--sample_size', type=int, default=150, help="Number of random samples to select, default is 150")
 
     # Parse the command-line arguments
     args = parser.parse_args()
@@ -37,7 +37,7 @@ def main():
     # Call the function to execute the sampling logic
     sample_jsonl(
         str(resolve_pipeline_path(args.input)),
-        str(resolve_pipeline_path(args.output)),
+        str(resolve_pipeline_path(args.output_path)),
         args.sample_size,
     )
 
