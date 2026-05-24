@@ -20,19 +20,22 @@ Generate a new HumanEval-style Python coding task.
 Return output EXACTLY in this format:
 
 [Start]
-{
-    "task_id": "HumanEval/100",
+{{
+    "task_id": "{task_id}",
     "prompt": "def add(a, b):\\n    pass",
     "entry_point": "add",
     "canonical_solution": "    return a + b",
     "test": "\\n\\ndef check(candidate):\\n    assert candidate(1,2)==3"
-}
+}}
 [End]
 """
 
 
-def gen_answer(model):
-    return call_model(model, PROMPT_TEMPLATE)
+import random
+
+def gen_answer(model, task_id):
+    prompt = PROMPT_TEMPLATE.format(task_id=task_id)
+    return call_model(model, prompt)
 
 
 def extract_wrapped_content(text):
@@ -48,11 +51,13 @@ def extract_wrapped_content(text):
         return None
 
 
-def process_task(task_id, model):
+def process_task(task_num, model):
+    task_id = f"HumanEval/{100 + task_num}"
     while True:
-        completion = gen_answer(model)
+        completion = gen_answer(model, task_id)
         parsed = extract_wrapped_content(completion)
         if parsed:
+            parsed["task_id"] = task_id
             return parsed
         print(f"Retrying task {task_id}...")
 
@@ -61,7 +66,7 @@ def main(output_path, total_tasks=10, model=None):
     samples = []
     selected_model = model or get_default_model()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
         futures = [executor.submit(process_task, i, selected_model) for i in range(total_tasks)]
 
         for future in tqdm(
