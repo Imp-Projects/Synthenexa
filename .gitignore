@@ -20,4 +20,4 @@ synthenexa-pipeline/Dataset/*.jsonl
 synthenexa-pipeline/Dataset/*.json
 synthenexa-pipeline/Dataset/temp/
 
-.log
+.logollama.log
