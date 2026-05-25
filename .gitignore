@@ -19,3 +19,5 @@ Thumbs.db
 synthenexa-pipeline/Dataset/*.jsonl
 synthenexa-pipeline/Dataset/*.json
 synthenexa-pipeline/Dataset/temp/
+
+.log
