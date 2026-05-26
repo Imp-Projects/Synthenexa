@@ -92,7 +92,7 @@ if __name__ == "__main__":
     parser.add_argument('--trainset_path', type=str, required=True, help="Path to the train set JSONL file.")
     parser.add_argument('--mutated_prompt_path', type=str, required=True, help="Path to the mutated prompt JSONL file.")
     parser.add_argument('--output_path', type=str, required=True, help="Directory to save the output files.")
-    parser.add_argument('--max_workers', type=int, default=50, help="ThreadPool workers for per-prompt task evaluation.")
+    parser.add_argument('--max_workers', type=int, default=30, help="ThreadPool workers for per-prompt task evaluation.")
 
     # Parse command-line arguments
     args = parser.parse_args()
