@@ -12,6 +12,11 @@ def _generate_url() -> str:
     return f"{base}/api/generate"
 
 
+def _chat_url() -> str:
+    base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+    return f"{base}/api/chat"
+
+
 def _groq_chat_url() -> str:
     base = os.getenv("GROQ_BASE_URL", "https://api.groq.com").rstrip("/")
     return f"{base}/openai/v1/chat/completions"
@@ -25,19 +30,24 @@ def _groq_timeout() -> int:
     return int(os.getenv("GROQ_TIMEOUT_SECONDS", "180"))
 
 
-def _call_ollama(model: str, prompt: str) -> str:
+def _call_ollama(model: str, prompt: str, system: str | None = None) -> str:
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+
     response = requests.post(
-        _generate_url(),
+        _chat_url(),
         json={
             "model": model or os.getenv("OLLAMA_MODEL", "qwen:latest"),
-            "prompt": prompt,
+            "messages": messages,
             "stream": False,
         },
         timeout=180,
     )
     response.raise_for_status()
     data = response.json()
-    return data.get("response", "")
+    return data.get("message", {}).get("content", "")
 
 
 def _call_groq(model: str, prompt: str) -> str:
@@ -75,12 +85,12 @@ def get_default_model() -> str:
     return os.getenv("OLLAMA_MODEL", "qwen:latest")
 
 
-def call_model(model: str, prompt: str) -> str:
+def call_model(model: str, prompt: str, system: str | None = None) -> str:
     selected_model = model or get_default_model()
 
     # Force Ollama if model is prefixed with "ollama:".
     if selected_model.startswith("ollama:"):
-        return _call_ollama(selected_model.split(":", 1)[1], prompt)
+        return _call_ollama(selected_model.split(":", 1)[1], prompt, system)
 
     # Force Groq if model is prefixed with "groq:".
     if selected_model.startswith("groq:"):
