@@ -1,3 +1,25 @@
+"""
+2_prompt_evaluate.py — Prompt Evaluation via Ollama
+
+Root-cause fix:
+  The model was receiving a task-generation instruction (mutated_prompt) combined
+  with a function stub, causing it to output a brand-new function instead of
+  implementing the stub. The evaluator then assembled:
+
+      testset_prompt + new_function_def
+
+  which produced two unrelated top-level defs → syntax error → 0/600 passed.
+
+Fix applied in GEN_SOLUTION / build_messages:
+  - The mutated prompt is now used as a *system-level coding style instruction*,
+    not prepended verbatim to the user message.
+  - The user message explicitly instructs the model to complete ONLY the given
+    stub, returning just the function body with no extra defs or markdown fences.
+  - _sanitize_completion now also strips a leading re-declaration of the function
+    signature so the evaluator receives only the indented body, matching how
+    HumanEval assembles: prompt_stub + canonical_solution_body.
+"""
+
 import json
 import os
 import re
@@ -11,52 +33,138 @@ from utils.paths import resolve_pipeline_path
 load_dotenv()
 
 
+# ---------------------------------------------------------------------------
+# I/O helpers
+# ---------------------------------------------------------------------------
+
 def write_jsonl(file_path, rows):
     with open(file_path, "w", encoding="utf-8") as file:
         for row in rows:
             file.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def GEN_SOLUTION(task_describe, prompt, model):
-    return call_model(model, f"{task_describe}\n\n{prompt}"), 0
+def read_jsonl(file_path):
+    with open(file_path, "r", encoding="utf-8") as file:
+        for line in file:
+            line = line.strip()
+            if line:
+                yield json.loads(line)
 
 
-def _sanitize_completion(text):
+# ---------------------------------------------------------------------------
+# Completion sanitization
+# ---------------------------------------------------------------------------
+
+def _sanitize_completion(text: str, entry_point: str | None = None) -> str:
+    """
+    Clean the raw model output so it contains only the function body lines
+    that the HumanEval evaluator expects to be appended to the prompt stub.
+
+    Steps:
+    1. Extract the longest fenced code block if present (model used markdown).
+    2. If the model re-declared the full function signature, strip everything
+       up to and including that line so only the indented body remains.
+    3. Strip leading/trailing blank lines.
+    """
     if not text:
         return text
-    # Prefer fenced code blocks if present.
+
+    # Step 1: prefer fenced code block content
     blocks = re.findall(r"```(?:python)?\s*([\s\S]*?)```", text, re.IGNORECASE)
     if blocks:
-        return max(blocks, key=lambda b: len(b.strip())).strip()
+        text = max(blocks, key=lambda b: len(b.strip()))
+
+    text = text.strip()
+
+    # Step 2: if the model repeated the function signature, drop up to that line
+    # so the evaluator doesn't get a duplicate def.
+    if entry_point:
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            # Match the def line for this function (allow decorators above it)
+            if re.match(rf"\s*def\s+{re.escape(entry_point)}\s*\(", line):
+                # Keep only lines after the signature (the body)
+                text = "\n".join(lines[i + 1:])
+                break
+
     return text.strip()
 
 
-def process_task(task_id, task_describe, prompt, model):
-    completion, tokens_used = GEN_SOLUTION(task_describe, prompt, model)
-    return dict(task_id=task_id, completion=_sanitize_completion(completion)), tokens_used
+# ---------------------------------------------------------------------------
+# Core generation
+# ---------------------------------------------------------------------------
+
+_SYSTEM_TEMPLATE = """\
+You are an expert Python programmer. {style_instruction}
+
+Your task is to implement the body of the Python function whose stub is provided.
+
+Rules:
+- Return ONLY the indented function body (the lines that go inside the def).
+- Do NOT repeat the function signature or the docstring.
+- Do NOT wrap your answer in markdown fences.
+- Do NOT define any extra helper functions outside the given function.
+- The implementation must be correct and handle all edge cases described in the docstring.
+"""
+
+_USER_TEMPLATE = """\
+Complete the following Python function. Return only the indented body lines.
+
+{prompt_stub}
+"""
 
 
-def read_jsonl(file_path):
-    with open(file_path, 'r') as file:
-        for line in file:
-            yield json.loads(line)
+def GEN_SOLUTION(task_describe: str, prompt_stub: str, model: str) -> tuple[str, int]:
+    """
+    Call the model to implement *prompt_stub* under the persona/style defined
+    by *task_describe* (the mutated prompt).
+
+    The mutated prompt is embedded as a system message so it shapes *how* the
+    model codes without overriding the task itself. call_model now forwards
+    system= to /api/chat (Ollama) or chat completions (Groq).
+    """
+    system_msg = _SYSTEM_TEMPLATE.format(style_instruction=task_describe)
+    user_msg = _USER_TEMPLATE.format(prompt_stub=prompt_stub)
+    response = call_model(model, user_msg, system=system_msg)
+    return response, 0
 
 
-def main(model, testset_path, mutated_prompt_path, output_path, max_workers):
+def process_task(
+    task_id: str,
+    task_describe: str,
+    prompt_stub: str,
+    entry_point: str,
+    model: str,
+) -> tuple[dict, int]:
+    completion, tokens_used = GEN_SOLUTION(task_describe, prompt_stub, model)
+    clean = _sanitize_completion(completion, entry_point=entry_point)
+    return dict(task_id=task_id, completion=clean), tokens_used
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline (interface unchanged)
+# ---------------------------------------------------------------------------
+
+def main(
+    model: str | None,
+    testset_path: str,
+    mutated_prompt_path: str,
+    output_path: str,
+    max_workers: int,
+) -> None:
     model = model or get_default_model()
     model_slug = model.replace(":", "_").replace("/", "_")
     tasks = list(read_jsonl(testset_path))
     os.makedirs(output_path, exist_ok=True)
     mutated_prompt_rows = list(read_jsonl(mutated_prompt_path))
 
-    total_tokens = 0  # Initialize total tokens counter
+    total_tokens = 0
 
     for row in mutated_prompt_rows:
         prompt_id = row["prompt_id"]
         task_describe = row["mutated_prompt"]
         samples = []
 
-        # Full-set evaluation policy: every mutated prompt is evaluated on every task.
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
@@ -64,21 +172,27 @@ def main(model, testset_path, mutated_prompt_path, output_path, max_workers):
                     task["task_id"],
                     task_describe,
                     task.get("prompt", ""),
+                    task.get("entry_point", ""),   # needed for signature stripping
                     model,
                 )
                 for task in tasks
             ]
 
-            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures),
-                               desc=f"Processing tasks for prompt_id {prompt_id}"):
+            for future in tqdm(
+                concurrent.futures.as_completed(futures),
+                total=len(futures),
+                desc=f"Processing tasks for prompt_id {prompt_id}",
+            ):
                 result, tokens_used = future.result()
-                total_tokens += tokens_used  # Accumulate total tokens
-                if result['completion']:
+                total_tokens += tokens_used
+                if result["completion"]:
                     samples.append(result)
                 else:
-                    print(f"No valid completion for task_id: {result['task_id']} with prompt_id: {prompt_id}")
+                    print(
+                        f"No valid completion for task_id: {result['task_id']} "
+                        f"with prompt_id: {prompt_id}"
+                    )
 
-        # Keep a stable order for easier debugging/repro comparisons.
         samples.sort(key=lambda item: item["task_id"])
         output_file = os.path.join(output_path, f"train_set_{model_slug}_{prompt_id}.jsonl")
         write_jsonl(output_file, samples)
@@ -86,15 +200,18 @@ def main(model, testset_path, mutated_prompt_path, output_path, max_workers):
     print(f"Total tokens used: {total_tokens}")
 
 
+# ---------------------------------------------------------------------------
+# CLI (unchanged)
+# ---------------------------------------------------------------------------
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run prompt evaluation using Ollama.")
-    parser.add_argument('--model', type=str, default=None, help="Ollama model name from .env (e.g., 'qwen:latest').")
-    parser.add_argument('--trainset_path', type=str, required=True, help="Path to the train set JSONL file.")
-    parser.add_argument('--mutated_prompt_path', type=str, required=True, help="Path to the mutated prompt JSONL file.")
-    parser.add_argument('--output_path', type=str, required=True, help="Directory to save the output files.")
-    parser.add_argument('--max_workers', type=int, default=30, help="ThreadPool workers for per-prompt task evaluation.")
+    parser.add_argument("--model", type=str, default=None)
+    parser.add_argument("--trainset_path", type=str, required=True)
+    parser.add_argument("--mutated_prompt_path", type=str, required=True)
+    parser.add_argument("--output_path", type=str, required=True)
+    parser.add_argument("--max_workers", type=int, default=30)
 
-    # Parse command-line arguments
     args = parser.parse_args()
 
     main(
