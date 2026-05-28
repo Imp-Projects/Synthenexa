@@ -2,7 +2,7 @@ python synthenexa_pipeline/0_train_set_generate.py --output_path Dataset/testrun
 
 python synthenexa_pipeline/0_train_set_select.py --input Dataset/testrun-full-1/train_set.jsonl --output_path Dataset/testrun-full-1/selected_promts.jsonl --sample_size 70
 
-python synthenexa_pipeline/1_prompt_mutate.py --model ollama:qwen3-coder:30b --prompt_path Dataset/testrun-full-1/selected_promts.jsonl --output_path Dataset/testrun-full-1/mutated_prmts.jsonl --num_mutations=100
+python synthenexa_pipeline/1_prompt_mutate.py --model ollama:qwen3-coder:30b --prompt_path Dataset/testrun-full-1/selected_promts.jsonl --output_path Dataset/testrun-full-1/mutated_prmts.jsonl --num_mutations=40
 
 python synthenexa_pipeline/2_prompt_evaluate.py --model ollama:qwen3-coder:30b --trainset_path Dataset/testrun-full-1/train_set.jsonl --mutated_prompt_path Dataset/testrun-full-1/mutated_prmts.jsonl --output_path Dataset/testrun-full-1/evaluatedprmts
 
