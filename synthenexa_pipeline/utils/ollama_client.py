@@ -7,11 +7,6 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
 
 
-def _generate_url() -> str:
-    base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
-    return f"{base}/api/generate"
-
-
 def _chat_url() -> str:
     base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
     return f"{base}/api/chat"
@@ -29,6 +24,11 @@ def _has_groq() -> bool:
 def _groq_timeout() -> int:
     return int(os.getenv("GROQ_TIMEOUT_SECONDS", "180"))
 
+def get_default_model() -> str:
+    if _has_groq():
+        return os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+    return os.getenv("OLLAMA_MODEL", "nemotron-3-super:cloud")
+
 
 def _call_ollama(model: str, prompt: str, system: str | None = None) -> str:
     messages = []
@@ -39,7 +39,7 @@ def _call_ollama(model: str, prompt: str, system: str | None = None) -> str:
     response = requests.post(
         _chat_url(),
         json={
-            "model": model or os.getenv("OLLAMA_MODEL", "qwen:latest"),
+            "model": model,
             "messages": messages,
             "stream": False,
         },
@@ -62,7 +62,7 @@ def _call_groq(model: str, prompt: str) -> str:
             "Content-Type": "application/json",
         },
         json={
-            "model": model or os.getenv("GROQ_MODEL", "llama-3.1-8b-instant"),
+            "model": model,
             "messages": [
                 {"role": "user", "content": prompt},
             ],
@@ -79,33 +79,25 @@ def _call_groq(model: str, prompt: str) -> str:
     )
 
 
-def get_default_model() -> str:
+def call_model(model: str | None, prompt: str, system: str | None = None) -> str:
+    # 1. User explicitly specified a model: NO fallback.
+    if model:
+        if model.startswith("groq:"):
+            return _call_groq(model.split(":", 1)[1], prompt)
+        elif model.startswith("ollama:"):
+            return _call_ollama(model.split(":", 1)[1], prompt, system)
+        else:
+            # By default, assume unprefixed explicitly passed models are Ollama models.
+            return _call_ollama(model, prompt, system)
+            
+    # 2. No model specified: Use the default fallback chain.
     if _has_groq():
-        return os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-    return os.getenv("OLLAMA_MODEL", "qwen:latest")
-
-
-def call_model(model: str, prompt: str, system: str | None = None) -> str:
-    selected_model = model or get_default_model()
-
-    # Force Ollama if model is prefixed with "ollama:".
-    if selected_model.startswith("ollama:"):
-        return _call_ollama(selected_model.split(":", 1)[1], prompt, system)
-
-    # Force Groq if model is prefixed with "groq:".
-    if selected_model.startswith("groq:"):
-        groq_model = selected_model.split(":", 1)[1]
+        groq_model = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
         try:
             return _call_groq(groq_model, prompt)
         except Exception as groq_error:
             print(f"[warn] Groq request failed, falling back to Ollama: {groq_error}")
-            return _call_ollama(os.getenv("OLLAMA_MODEL", "qwen:latest"), prompt)
-
-    # Default routing: Groq first (if configured), then fallback to Ollama.
-    if _has_groq():
-        try:
-            return _call_groq(selected_model, prompt)
-        except Exception as groq_error:
-            print(f"[warn] Groq request failed, falling back to Ollama: {groq_error}")
-
-    return _call_ollama(os.getenv("OLLAMA_MODEL", "qwen:latest"), prompt)
+            
+    # Fallback / Default to Ollama
+    ollama_model = os.getenv("OLLAMA_MODEL", "nemotron-3-super:cloud")
+    return _call_ollama(ollama_model, prompt, system)

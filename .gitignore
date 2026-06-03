@@ -3,6 +3,7 @@
 
 # Virtual environment
 venv/
+.venv/
 
 # Python cache
 __pycache__/
@@ -15,9 +16,8 @@ data/
 .DS_Store
 Thumbs.db
 
-# Phase 3 generated datasets
-synthenexa-pipeline/Dataset/*.jsonl
-synthenexa-pipeline/Dataset/*.json
-synthenexa-pipeline/Dataset/temp/
+# Generated pipeline datasets and evaluation outputs
+synthenexa_pipeline/Dataset/*
+!synthenexa_pipeline/Dataset/benchmark_mbpp_micro.jsonl
 
 ollama.log

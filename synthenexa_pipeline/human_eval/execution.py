@@ -22,76 +22,56 @@ def check_correctness(problem: Dict, completion: str, timeout: float,
         the results later even if execution finishes asynchronously.
     """
 
-    def unsafe_execute():
+def _unsafe_execute(problem, completion, timeout, q):
+    with create_tempdir():
+        import os
+        import shutil
+        rmtree = shutil.rmtree
+        rmdir = os.rmdir
+        chdir = os.chdir
 
-        with create_tempdir():
+        reliability_guard()
 
-            # These system calls are needed when cleaning up tempdir.
-            import os
-            import shutil
-            rmtree = shutil.rmtree
-            rmdir = os.rmdir
-            chdir = os.chdir
+        check_program = (
+            problem["prompt"] + "\n" + completion + "\n" +
+            problem["test"] + "\n" +
+            f"check({problem['entry_point']})"
+        )
 
-            # Disable functionalities that can make destructive changes to the test.
-            reliability_guard()
+        try:
+            exec_globals = {}
+            with swallow_io():
+                with time_limit(timeout):
+                    exec(check_program, exec_globals)
+            q.put("passed")
+        except TimeoutException:
+            q.put("timed out")
+        except BaseException as e:
+            q.put(f"failed: {e}")
 
-            # Construct the check program and run it.
-            check_program = (
-                # humaneval
-                # 'from typing import List\n' +
-                problem["prompt"] + "\n" + completion + "\n" +
-                problem["test"] + "\n" +
-                f"check({problem['entry_point']})"
+        shutil.rmtree = rmtree
+        os.rmdir = rmdir
+        os.chdir = chdir
 
-                # mbpp
-                # completion + "\n" +
-                # problem["test"] + "\n" +
-                # f"check({problem['entry_point']})"
-            )
-
-            try:
-                exec_globals = {}
-                with swallow_io():
-                    with time_limit(timeout):
-# WARNING
-# This program exists to execute untrusted model-generated code. Although
-# it is highly unlikely that model-generated code will do something overtly
-# malicious in response to this test suite, model-generated code may act
-# destructively due to a lack of model capability or alignment.
-# Users are strongly encouraged to sandbox this evaluation suite so that it 
-# does not perform destructive actions on their host or network. For more 
-# information on how OpenAI sandboxes its code, see the accompanying paper.
-# Once you have read this disclaimer and taken appropriate precautions, 
-# uncomment the following line and proceed at your own risk:
-                        exec(check_program, exec_globals)
-                        result.append("passed")
-            except TimeoutException:
-                result.append("timed out")
-            except BaseException as e:
-                result.append(f"failed: {e}")
-
-            # Needed for cleaning up.
-            shutil.rmtree = rmtree
-            os.rmdir = rmdir
-            os.chdir = chdir
-
-    manager = multiprocessing.Manager()
-    result = manager.list()
-
-    p = multiprocessing.Process(target=unsafe_execute)
+def check_correctness(problem: Dict, completion: str, timeout: float,
+                      completion_id: Optional[int] = None) -> Dict:
+    q = multiprocessing.Queue()
+    p = multiprocessing.Process(target=_unsafe_execute, args=(problem, completion, timeout, q))
     p.start()
     p.join(timeout=timeout + 1)
+    
     if p.is_alive():
         p.kill()
-
-    if not result:
-        result.append("timed out")
+        p.join()
+        
+    result_val = "timed out"
+    if not q.empty():
+        result_val = q.get()
 
     return dict(
         task_id=problem["task_id"],
-        passed=result[0] == "passed",
-        result=result[0],
+        passed=result_val == "passed",
+        result=result_val,
         completion_id=completion_id,
     )
 

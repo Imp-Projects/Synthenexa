@@ -253,10 +253,11 @@ def _is_passed(result_data: dict) -> bool:
     return False
 
 
-def _read_result_stats(result_file_path: str) -> tuple[int, int, float, list]:
+def _read_result_stats(result_file_path: str) -> tuple[int, int, float, list, list]:
     total_count = 0
     passed_count = 0
     passed_task_ids: list = []
+    failed_details: list = []
     invalid_lines = 0
 
     with _open_text(result_file_path) as result_file:
@@ -281,6 +282,10 @@ def _read_result_stats(result_file_path: str) -> tuple[int, int, float, list]:
                 task_id = result_data.get("task_id")
                 if task_id is not None:
                     passed_task_ids.append(task_id)
+            else:
+                task_id = result_data.get("task_id", "unknown")
+                error_msg = result_data.get("result", "failed")
+                failed_details.append(f"Task {task_id}: {error_msg}")
 
     # Fix 7: detect empty / entirely-malformed files
     if total_count == 0:
@@ -300,7 +305,7 @@ def _read_result_stats(result_file_path: str) -> tuple[int, int, float, list]:
         )
 
     score = passed_count / total_count if total_count > 0 else 0.0
-    return total_count, passed_count, score, passed_task_ids
+    return total_count, passed_count, score, passed_task_ids, failed_details
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +373,7 @@ def rank_prompts(
             }
             continue
 
-        total_count, passed_count, score, passed_task_ids = _read_result_stats(result_file_path)
+        total_count, passed_count, score, passed_task_ids, failed_details = _read_result_stats(result_file_path)
 
         # Fix 11: determine evaluation status
         if total_count == 0:
@@ -387,41 +392,20 @@ def rank_prompts(
             "total_count": total_count,
             "eval_status": eval_status,
             "_passed_task_ids": passed_task_ids,
+            "errors": failed_details,
         }
         logger.info(
-            "%-45s score=%.4f  passed=%d/%d  status=%s",
+            "%-45s score=%.2f%%  passed=%d/%d  status=%s",
             filename,
-            score,
+            score * 100,
             passed_count,
             total_count,
             eval_status,
         )
 
-    # ------------------------------------------------------------------
-    # Fix 5 & 6: Normalized inverse-frequency weighting
-    # ------------------------------------------------------------------
-    #   weight(task) = 1 / solve_count          (stable; rare tasks count more)
-    #   weighted_score(prompt) = Σ weight(solved_task) / n_tasks_in_prompt
-    # ------------------------------------------------------------------
-    task_weights: dict = {}
-    if task_correct_counts:
-        task_weights = {task_id: 1.0 / count for task_id, count in task_correct_counts.items()}
-        logger.debug("Task weights (sample): %s", dict(list(task_weights.items())[:5]))
-
-    for stats in prompt_stats.values():
-        passed_ids = stats.get("_passed_task_ids", [])
-        n_tasks = stats.get("total_count", 0)
-        if n_tasks > 0 and passed_ids:
-            raw_weighted = sum(task_weights.get(tid, 0.0) for tid in passed_ids)
-            # Normalize by total tasks evaluated for this prompt
-            stats["weighted_score"] = raw_weighted / n_tasks
-        else:
-            stats["weighted_score"] = 0.0
-        stats.pop("_passed_task_ids", None)
-
     ranked_scores = sorted(
         prompt_stats.values(),
-        key=lambda row: (-row["weighted_score"], -row["score"], row["prompt_id"]),
+        key=lambda row: (-row["score"], row["prompt_id"]),
     )
 
     for rank_index, row in enumerate(ranked_scores, start=1):
@@ -473,7 +457,7 @@ def write_ranked_prompts(
 
     final_ranked = sorted(
         scores_by_id.values(),
-        key=lambda row: (-row["weighted_score"], -row["score"], row["prompt_id"]),
+        key=lambda row: (-row["score"], row["prompt_id"]),
     )
     for rank_index, row in enumerate(final_ranked, start=1):
         row["rank"] = rank_index
@@ -487,11 +471,12 @@ def write_ranked_prompts(
                 continue
             prompt_data = dict(prompt_data)
             prompt_data["score"] = row["score"]
-            prompt_data["weighted_score"] = row["weighted_score"]
             prompt_data["passed_count"] = row["passed_count"]
             prompt_data["total_count"] = row["total_count"]
             prompt_data["eval_status"] = row.get("eval_status", EVAL_STATUS_MISSING)
             prompt_data["rank"] = row["rank"]
+            if "errors" in row:
+                prompt_data["errors"] = row["errors"]
             out.write(json.dumps(prompt_data) + "\n")
             saved += 1
 
@@ -559,8 +544,8 @@ def main(
     if top:
         print(
             f"\nRanked prompts saved → {output_path}\n"
-            f"  Top: prompt_id={top['prompt_id']}  score={top['score']:.4f}  "
-            f"weighted_score={top['weighted_score']:.4f}  status={top.get('eval_status')}\n"
+            f"  Top: prompt_id={top['prompt_id']}  score={top['score']*100:.2f}%  "
+            f"status={top.get('eval_status')}\n"
             f"  Entries written : {saved}\n"
             f"  Eval summary    : {success_count} success | "
             f"{missing_count} missing_results | {invalid_count} invalid_schema"
