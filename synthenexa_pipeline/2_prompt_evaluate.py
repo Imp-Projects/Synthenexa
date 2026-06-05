@@ -1,3 +1,25 @@
+"""
+2_prompt_evaluate.py — Prompt Evaluation via Ollama
+
+Root-cause fix:
+  The model was receiving a task-generation instruction (mutated_prompt) combined
+  with a function stub, causing it to output a brand-new function instead of
+  implementing the stub. The evaluator then assembled:
+
+      testset_prompt + new_function_def
+
+  which produced two unrelated top-level defs → syntax error → 0/600 passed.
+
+Fix applied in GEN_SOLUTION / build_messages:
+  - The mutated prompt is now used as a *system-level coding style instruction*,
+    not prepended verbatim to the user message.
+  - The user message explicitly instructs the model to complete ONLY the given
+    stub, returning just the function body with no extra defs or markdown fences.
+  - _sanitize_completion now also strips a leading re-declaration of the function
+    signature so the evaluator receives only the indented body, matching how
+    HumanEval assembles: prompt_stub + canonical_solution_body.
+"""
+
 import json
 import os
 import re
@@ -30,6 +52,33 @@ def read_jsonl(file_path):
 
 
 # ---------------------------------------------------------------------------
+# Stub builder — handles tasks where prompt field is empty (e.g. MBPP)
+# ---------------------------------------------------------------------------
+
+def _build_stub(task: dict) -> str:
+    """
+    Return the function stub to send to the model.
+
+    HumanEval tasks have a fully-formed stub in the 'prompt' field.
+    MBPP tasks have an empty 'prompt' but a natural-language 'text' field
+    and an 'entry_point'. We construct a minimal stub from those so the
+    model always receives a concrete function signature to complete.
+    """
+    prompt = task.get("prompt", "").strip()
+    if prompt:
+        return prompt
+
+    # Fallback: build a stub from entry_point + text description
+    entry_point = task.get("entry_point", "solve")
+    description = task.get("text", "").strip()
+    stub = f'def {entry_point}(*args):\n'
+    if description:
+        stub += f'    """{description}"""\n'
+    stub += '    pass'
+    return stub
+
+
+# ---------------------------------------------------------------------------
 # Completion sanitization
 # ---------------------------------------------------------------------------
 
@@ -39,31 +88,41 @@ def _sanitize_completion(text: str, entry_point: str | None = None) -> str:
     that the HumanEval evaluator expects to be appended to the prompt stub.
 
     Steps:
-    1. Extract the longest fenced code block if present (model used markdown).
-    2. If the model re-declared the full function signature, strip everything
-       up to and including that line so only the indented body remains.
-    3. Strip leading/trailing blank lines.
+    1. Strip model reasoning tags (<think>...</think> / </think>).
+    2. Extract the longest fenced code block if present.
+    3. If the model re-declared the full function signature, strip it.
+    4. Ensure every line is indented by at least 4 spaces (fixes unindented output).
+    5. Strip leading/trailing blank lines.
     """
     if not text:
         return text
 
-    # Step 1: prefer fenced code block content
+    # Step 1: strip reasoning tags that some models leak into output
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    text = re.sub(r"</think>", "", text)
+
+    # Step 2: prefer fenced code block content
     blocks = re.findall(r"```(?:python)?\s*([\s\S]*?)```", text, re.IGNORECASE)
     if blocks:
         text = max(blocks, key=lambda b: len(b.strip()))
 
     text = text.strip()
 
-    # Step 2: if the model repeated the function signature, drop up to that line
-    # so the evaluator doesn't get a duplicate def.
+    # Step 3: if the model repeated the function signature, drop it
     if entry_point:
         lines = text.splitlines()
         for i, line in enumerate(lines):
-            # Match the def line for this function (allow decorators above it)
             if re.match(rf"\s*def\s+{re.escape(entry_point)}\s*\(", line):
-                # Keep only lines after the signature (the body)
                 text = "\n".join(lines[i + 1:])
                 break
+
+    # Step 4: ensure body is indented — if no line starts with whitespace,
+    # the model returned flat code which causes IndentationError when appended
+    # to the stub. Prefix every non-empty line with 4 spaces.
+    lines = text.splitlines()
+    if lines and not lines[0].startswith(" ") and not lines[0].startswith("\t"):
+        lines = ["    " + line if line.strip() else line for line in lines]
+        text = "\n".join(lines)
 
     return text.strip()
 
@@ -86,13 +145,14 @@ Rules:
 """
 
 _USER_TEMPLATE = """\
-Complete the following Python function. Return only the indented body lines.
+Complete the following Python function. The function you implement MUST be named `{entry_point}`.
+Return only the indented body lines — do not repeat the signature.
 
 {prompt_stub}
 """
 
 
-def GEN_SOLUTION(task_describe: str, prompt_stub: str, model: str) -> tuple[str, int]:
+def GEN_SOLUTION(task_describe: str, prompt_stub: str, entry_point: str, model: str) -> tuple[str, int]:
     """
     Call the model to implement *prompt_stub* under the persona/style defined
     by *task_describe* (the mutated prompt).
@@ -102,7 +162,7 @@ def GEN_SOLUTION(task_describe: str, prompt_stub: str, model: str) -> tuple[str,
     system= to /api/chat (Ollama) or chat completions (Groq).
     """
     system_msg = _SYSTEM_TEMPLATE.format(style_instruction=task_describe)
-    user_msg = _USER_TEMPLATE.format(prompt_stub=prompt_stub)
+    user_msg = _USER_TEMPLATE.format(entry_point=entry_point, prompt_stub=prompt_stub)
     response = call_model(model, user_msg, system=system_msg)
     return response, 0
 
@@ -114,7 +174,7 @@ def process_task(
     entry_point: str,
     model: str,
 ) -> tuple[dict, int]:
-    completion, tokens_used = GEN_SOLUTION(task_describe, prompt_stub, model)
+    completion, tokens_used = GEN_SOLUTION(task_describe, prompt_stub, entry_point, model)
     clean = _sanitize_completion(completion, entry_point=entry_point)
     return dict(task_id=task_id, completion=clean), tokens_used
 
@@ -149,8 +209,8 @@ def main(
                     process_task,
                     task["task_id"],
                     task_describe,
-                    task.get("prompt", ""),
-                    task.get("entry_point", ""),   # needed for signature stripping
+                    _build_stub(task),             # handles empty MBPP prompt field
+                    task.get("entry_point", ""),
                     model,
                 )
                 for task in tasks
@@ -188,7 +248,7 @@ if __name__ == "__main__":
     parser.add_argument("--trainset_path", type=str, required=True)
     parser.add_argument("--mutated_prompt_path", type=str, required=True)
     parser.add_argument("--output_path", type=str, required=True)
-    parser.add_argument("--max_workers", type=int, default=5)
+    parser.add_argument("--max_workers", type=int, default=30)
 
     args = parser.parse_args()
 
