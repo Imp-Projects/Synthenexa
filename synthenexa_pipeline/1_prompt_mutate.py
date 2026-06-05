@@ -20,13 +20,14 @@ FORMAT_INSTRUCTION = """
 Wrap the optimized prompt in {{}}.
 """
 
+
 def build_mutation_prompt(base_prompt, feedback_data=None):
     if feedback_data and "errors" in feedback_data and feedback_data["errors"]:
         error_context = "The previous prompt failed on the following test cases due to these errors:\n"
         for i, err in enumerate(feedback_data["errors"][:5]):
             error_context += f"{i+1}. {err}\n"
         error_context += "\nPlease rewrite the system prompt specifically to address these edge cases and errors."
-        
+
         full_prompt = (
             BASE_TASK_DESCRIBE + "\n" +
             BASE_INFORMATION + "\n" +
@@ -43,6 +44,7 @@ def build_mutation_prompt(base_prompt, feedback_data=None):
         )
     return full_prompt
 
+
 def extract_wrapped_content(text):
     if not text or not isinstance(text, str):
         return None
@@ -50,6 +52,7 @@ def extract_wrapped_content(text):
     if match:
         return match.group(1).strip()
     return None
+
 
 def process_task(task_id, base_prompt, feedback_data, model):
     prompt = build_mutation_prompt(base_prompt, feedback_data)
@@ -61,28 +64,31 @@ def process_task(task_id, base_prompt, feedback_data, model):
         if wrapped_content:
             return {
                 "prompt_id": task_id,
-                "mutated_prompt": wrapped_content
+                "mutated_prompt": wrapped_content,
             }
     print(f"⚠️ Task {task_id} exhausted all attempts.")
     return None
+
 
 def write_jsonl(path, data):
     with open(path, "w", encoding="utf-8") as f:
         for item in data:
             f.write(json.dumps(item) + "\n")
 
+
 def read_jsonl(file_path):
     with open(file_path, "r", encoding="utf-8") as f:
         return [json.loads(line) for line in f if line.strip()]
 
+
 def main(model, base_prompt_path, feedback_path, output_path, num_mutations=5):
     model = model or get_default_model()
-    
+
     base_prompts = read_jsonl(base_prompt_path)
     if not base_prompts:
         raise ValueError("No base prompt found.")
-    
-    # Use the best prompt from the previous round if feedback exists
+
+    # Use the best prompt from the previous round if feedback exists.
     feedback_data = None
     if feedback_path and os.path.exists(feedback_path):
         with open(feedback_path, "r", encoding="utf-8") as f:
@@ -95,27 +101,48 @@ def main(model, base_prompt_path, feedback_path, output_path, num_mutations=5):
                     base_prompt_text = feedback_data["prompt"]
                 else:
                     base_prompt_text = base_prompts[0].get("mutated_prompt", base_prompts[0].get("prompt", ""))
+
+                # Log what the previous generation achieved so progress is visible.
+                prev_score = feedback_data.get("score")
+                prev_passed = feedback_data.get("passed_count")
+                prev_total = feedback_data.get("total_count")
+                prev_errors = feedback_data.get("errors", [])
+                if prev_score is not None:
+                    print(
+                        f"Previous best: score={prev_score*100:.1f}%  "
+                        f"passed={prev_passed}/{prev_total}  "
+                        f"errors to fix={len(prev_errors)}"
+                    )
             else:
                 base_prompt_text = base_prompts[0].get("mutated_prompt", base_prompts[0].get("prompt", ""))
     else:
         base_prompt_text = base_prompts[0].get("mutated_prompt", base_prompts[0].get("prompt", ""))
-        
+
     samples = []
-    
+
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = [
             executor.submit(process_task, idx, base_prompt_text, feedback_data, model)
             for idx in range(num_mutations)
         ]
-        
-        for future in tqdm(concurrent.futures.as_completed(futures), total=num_mutations, desc="Mutating Prompts"):
+
+        for future in tqdm(
+            concurrent.futures.as_completed(futures),
+            total=num_mutations,
+            desc="Mutating Prompts",
+        ):
             result = future.result()
             if result:
                 samples.append(result)
-                
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
+    # Guard against output_path being a bare filename with no parent directory.
+    output_dir = os.path.dirname(output_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+
     write_jsonl(output_path, samples)
-    print(f"Generated {len(samples)} mutated prompts.")
+    print(f"Generated {len(samples)} mutated prompts → {output_path}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -124,9 +151,9 @@ if __name__ == "__main__":
     parser.add_argument("--feedback_path", default=None)
     parser.add_argument("--output_path", required=True)
     parser.add_argument("--num_mutations", type=int, default=5)
-    
+
     args = parser.parse_args()
-    
+
     main(
         args.model,
         str(resolve_pipeline_path(args.base_prompt_path)),
