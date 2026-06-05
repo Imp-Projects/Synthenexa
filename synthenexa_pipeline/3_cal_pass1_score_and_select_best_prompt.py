@@ -309,6 +309,54 @@ def _read_result_stats(result_file_path: str) -> tuple[int, int, float, list, li
 
 
 # ---------------------------------------------------------------------------
+# Error extraction for feedback loop
+# ---------------------------------------------------------------------------
+def _extract_errors_for_prompt(
+    eval_results_folder: str,
+    prompt_id: int,
+    max_errors: int = 10,
+) -> list[str]:
+    """
+    Collect failed result strings from the result file belonging to *prompt_id*.
+    These are injected into evaluation_feedback.jsonl so 1_prompt_mutate.py
+    knows exactly what to fix in the next generation.
+    """
+    errors: list[str] = []
+
+    # Find the sample file for this prompt_id
+    for filename in sorted(os.listdir(eval_results_folder)):
+        if not filename.endswith(".jsonl") or filename.endswith("_results.jsonl"):
+            continue
+        if _extract_prompt_id(filename) != prompt_id:
+            continue
+
+        sample_path = os.path.join(eval_results_folder, filename)
+        result_path = _resolve_result_file(sample_path)
+        if not result_path:
+            break
+
+        with _open_text(result_path) as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not _is_passed(record):
+                    result_str = record.get("result", "")
+                    task_id = record.get("task_id", "unknown")
+                    if result_str and result_str.lower() not in ("failed", ""):
+                        errors.append(f"[{task_id}] {result_str}")
+                    if len(errors) >= max_errors:
+                        break
+        break
+
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # Fix 11: Evaluation status tracking
 # ---------------------------------------------------------------------------
 EVAL_STATUS_SUCCESS = "success"
@@ -421,6 +469,7 @@ def write_ranked_prompts(
     prompts_path: str,
     ranked_scores: list[dict],
     output_path: str,
+    eval_results_folder: str | None = None,
 ) -> tuple[int, list[dict]]:
     prompts_by_id: dict = {}
     all_prompt_ids: list = []
@@ -475,8 +524,17 @@ def write_ranked_prompts(
             prompt_data["total_count"] = row["total_count"]
             prompt_data["eval_status"] = row.get("eval_status", EVAL_STATUS_MISSING)
             prompt_data["rank"] = row["rank"]
-            if "errors" in row:
-                prompt_data["errors"] = row["errors"]
+            # Only the top-ranked prompt carries error traces — 1_prompt_mutate.py
+            # reads only the first line of this file, so errors must be on rank 1.
+            if row["rank"] == 1:
+                prompt_data["errors"] = row.get("errors", [])
+                if prompt_data["errors"]:
+                    logger.info(
+                        "Injected %d error traces into feedback for top prompt_id=%d",
+                        len(prompt_data["errors"]), prompt_id,
+                    )
+            else:
+                prompt_data["errors"] = []
             out.write(json.dumps(prompt_data) + "\n")
             saved += 1
 
@@ -533,7 +591,9 @@ def main(
         )
         return
 
-    saved, final_ranked = write_ranked_prompts(prompts_path, ranked_scores, output_path)
+    saved, final_ranked = write_ranked_prompts(
+        prompts_path, ranked_scores, output_path, eval_results_folder=eval_results_folder
+    )
 
     # Summary
     success_count = sum(1 for r in final_ranked if r.get("eval_status") == EVAL_STATUS_SUCCESS)
