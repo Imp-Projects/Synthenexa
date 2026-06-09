@@ -1,25 +1,3 @@
-"""
-2_prompt_evaluate.py — Prompt Evaluation via Ollama
-
-Root-cause fix:
-  The model was receiving a task-generation instruction (mutated_prompt) combined
-  with a function stub, causing it to output a brand-new function instead of
-  implementing the stub. The evaluator then assembled:
-
-      testset_prompt + new_function_def
-
-  which produced two unrelated top-level defs → syntax error → 0/600 passed.
-
-Fix applied in GEN_SOLUTION / build_messages:
-  - The mutated prompt is now used as a *system-level coding style instruction*,
-    not prepended verbatim to the user message.
-  - The user message explicitly instructs the model to complete ONLY the given
-    stub, returning just the function body with no extra defs or markdown fences.
-  - _sanitize_completion now also strips a leading re-declaration of the function
-    signature so the evaluator receives only the indented body, matching how
-    HumanEval assembles: prompt_stub + canonical_solution_body.
-"""
-
 import json
 import os
 import re
