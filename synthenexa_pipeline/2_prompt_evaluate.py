@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import textwrap
 import argparse
 import concurrent.futures
 from tqdm import tqdm
@@ -57,6 +58,69 @@ def _build_stub(task: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Completion normalisation
+# ---------------------------------------------------------------------------
+
+def _extract_fenced_block(text: str) -> str:
+    """
+    Return the content between the first ```python fence and the closing ```.
+    Falls back to the whole string if no fences are found.
+    """
+    match = re.search(r"```python\s*([\s\S]*?)```", text, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    # Fallback: try a bare ``` fence (no language tag)
+    match = re.search(r"```\s*([\s\S]*?)```", text)
+    if match:
+        return match.group(1)
+    return text
+
+
+def _reindent(code: str, spaces: int = 4) -> str:
+    """
+    Remove common leading whitespace with textwrap.dedent, then re-indent
+    every non-empty, non-comment line by `spaces` spaces.
+
+    A line is considered a comment only when '#' is its first non-whitespace
+    character. Inline comments (code followed by #) are left untouched because
+    they are not standalone comment lines.
+    """
+    code = textwrap.dedent(code)
+    prefix = " " * spaces
+    result = []
+    for line in code.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            # preserve blank lines as-is (no indent added)
+            result.append("")
+        elif stripped.startswith("#"):
+            # standalone comment — re-indent like any other line
+            result.append(prefix + stripped)
+        else:
+            result.append(prefix + stripped)
+    return "\n".join(result)
+
+
+def _normalise_completion(raw: str) -> str:
+    """
+    Full normalisation pipeline applied to every raw model response:
+      1. Extract the fenced ```python ... ``` block (fallback: whole string).
+      2. textwrap.dedent to remove common leading whitespace.
+      3. Re-indent every non-empty line to exactly 4 spaces per level.
+      4. Strip surrounding blank lines.
+    """
+    block = _extract_fenced_block(raw)
+    normalised = _reindent(block, spaces=4)
+    # Strip leading/trailing blank lines without touching inner indentation
+    lines = normalised.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Completion sanitization
 # ---------------------------------------------------------------------------
 
@@ -102,7 +166,13 @@ def _sanitize_completion(text: str, entry_point: str | None = None) -> str:
         lines = ["    " + line if line.strip() else line for line in lines]
         text = "\n".join(lines)
 
-    return text.strip()
+    # Remove leading and trailing blank lines, but keep indentation of content
+    lines = text.splitlines()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return '\n'.join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -141,8 +211,14 @@ def GEN_SOLUTION(task_describe: str, prompt_stub: str, entry_point: str, model: 
     """
     system_msg = _SYSTEM_TEMPLATE.format(style_instruction=task_describe)
     user_msg = _USER_TEMPLATE.format(entry_point=entry_point, prompt_stub=prompt_stub)
-    response = call_model(model, user_msg, system=system_msg)
-    return response, 0
+    raw = call_model(model, user_msg, system=system_msg)
+
+    # Normalise immediately after receiving the raw response so that all
+    # downstream code (sanitization, evaluation) always sees clean, consistently
+    # indented Python — regardless of what the model actually returned.
+    normalised = _normalise_completion(raw) if raw else raw
+
+    return normalised, 0
 
 
 def process_task(
@@ -152,9 +228,9 @@ def process_task(
     entry_point: str,
     model: str,
 ) -> tuple[dict, int]:
-    completion, tokens_used = GEN_SOLUTION(task_describe, prompt_stub, entry_point, model)
-    clean = _sanitize_completion(completion, entry_point=entry_point)
-    return dict(task_id=task_id, completion=clean), tokens_used
+    raw_completion, tokens_used = GEN_SOLUTION(task_describe, prompt_stub, entry_point, model)
+    clean = _sanitize_completion(raw_completion, entry_point=entry_point)
+    return dict(task_id=task_id, completion=clean, raw_completion=raw_completion, prompt=task_describe, prompt_length=len(task_describe)), tokens_used
 
 
 # ---------------------------------------------------------------------------

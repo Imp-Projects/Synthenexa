@@ -151,7 +151,7 @@ def _resolve_result_file(sample_file_path: str) -> str | None:
         matches = glob.glob(pattern)
         if matches:
             chosen = sorted(matches)[0]
-            logger.debug("Resolved result file: %s → %s", sample_file_path, chosen)
+            logger.debug("Resolved result file: %s -> %s", sample_file_path, chosen)
             return chosen
 
     logger.debug("No result file found for: %s", sample_file_path)
@@ -603,7 +603,7 @@ def main(
     top = final_ranked[0] if final_ranked else None
     if top:
         print(
-            f"\nRanked prompts saved → {output_path}\n"
+            f"\nRanked prompts saved -> {output_path}\n"
             f"  Top: prompt_id={top['prompt_id']}  score={top['score']*100:.2f}%  "
             f"status={top.get('eval_status')}\n"
             f"  Entries written : {saved}\n"

@@ -14,10 +14,47 @@ BASE_TASK_DESCRIBE = "You are an expert prompt engineer."
 BASE_INFORMATION = """
 Please help me improve the given system prompt for a code generation model.
 The model will generate a Python program based on natural language descriptions.
-Ensure the optimized prompt includes a detailed task description and guidelines.
+Your goal is to maximize the number of test cases that pass, focusing on:
+- Correctness: the implementation should solve the problem as described.
+- Valid syntax: the generated code must be syntactically correct Python.
+- Exact function naming: the function must be named exactly as specified in the entry point.
+- Evaluator compatibility: the output must be in the format expected by the evaluation script (only the indented function body, no extra text).
+Ensure the optimized prompt includes a detailed task description and guidelines that lead to these outcomes.
 """
 FORMAT_INSTRUCTION = """
 Wrap the optimized prompt in {{}}.
+"""
+
+CODE_FORMAT_INSTRUCTION = """
+When you write Python code, you MUST:
+- Return the code **only** inside a single Markdown fenced block that starts with ```python and ends with ```.
+- Use exactly 4 spaces for each indentation level (no tabs).
+- Do not add any extra text before or after the fenced block.
+"""
+
+FEW_SHOT_EXAMPLES = """
+Here are two examples of the exact output format expected:
+
+Example 1
+Description: Write a function called `add_two` that takes two integers and returns their sum.
+Expected output:
+```python
+def add_two(a: int, b: int) -> int:
+    return a + b
+```
+
+Example 2
+Description: Write a function called `reverse_string` that takes a string and returns it reversed.
+Expected output:
+```python
+def reverse_string(s: str) -> str:
+    return s[::-1]
+```
+
+Notice:
+- The function name matches the entry point exactly.
+- Indentation is exactly 4 spaces — no tabs, no 2-space indent.
+- There is no prose, no explanation, and no extra code outside the fenced block.
 """
 
 
@@ -33,6 +70,8 @@ def build_mutation_prompt(base_prompt, feedback_data=None):
             BASE_INFORMATION + "\n" +
             f"Here is the previous prompt:\n{base_prompt}\n\n" +
             error_context + "\n" +
+            CODE_FORMAT_INSTRUCTION + "\n" +
+            FEW_SHOT_EXAMPLES + "\n" +
             FORMAT_INSTRUCTION
         )
     else:
@@ -40,6 +79,8 @@ def build_mutation_prompt(base_prompt, feedback_data=None):
             BASE_TASK_DESCRIBE + "\n" +
             BASE_INFORMATION + "\n" +
             f"Here is the base prompt to improve:\n{base_prompt}\n" +
+            CODE_FORMAT_INSTRUCTION + "\n" +
+            FEW_SHOT_EXAMPLES + "\n" +
             FORMAT_INSTRUCTION
         )
     return full_prompt
@@ -141,7 +182,7 @@ def main(model, base_prompt_path, feedback_path, output_path, num_mutations=5):
         os.makedirs(output_dir, exist_ok=True)
 
     write_jsonl(output_path, samples)
-    print(f"Generated {len(samples)} mutated prompts → {output_path}")
+    print(f"Generated {len(samples)} mutated prompts -> {output_path}")
 
 
 if __name__ == "__main__":
