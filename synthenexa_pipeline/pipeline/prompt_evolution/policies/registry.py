@@ -56,6 +56,7 @@ class PolicyRegistry:
         policy_class = cls._registry[name]
 
         if name == "epsilon_greedy":
+            #return policy_class(epsilon=config.epsilon)
             # Explicitly cast to the concrete type so the type checker can verify
             # the `epsilon` kwarg — a dict lookup alone can't narrow Type[Policy].
             return EpsilonGreedySelectionPolicy(epsilon=config.epsilon)
