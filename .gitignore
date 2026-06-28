@@ -21,3 +21,6 @@ synthenexa_pipeline/Dataset/*
 !synthenexa_pipeline/Dataset/benchmark_mbpp_micro.jsonl
 
 ollama.log
+
+# Experiments artifacts
+synthenexa_pipeline/experiments/artifacts/
