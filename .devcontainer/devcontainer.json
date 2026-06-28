@@ -4,20 +4,7 @@
     "dockerfile": "Dockerfile",
     "context": ".."
   },
-  "forwardPorts": [8000, 11434],
-  "portsAttributes": {
-    "8000": {
-      "label": "FastAPI",
-      "protocol": "http",
-      "onAutoForward": "notify"
-    },
-    "11434": {
-      "label": "Ollama",
-      "protocol": "http",
-      "onAutoForward": "notify"
-    }
-  },
-  "postCreateCommand": "pip install -r requirements.txt && ollama pull nemotron-super:27b",
+  "postCreateCommand": "pip install -r requirements.txt",
   "customizations": {
     "vscode": {
       "extensions": [
@@ -25,9 +12,7 @@
         "ms-python.vscode-pylance",
         "charliermarsh.ruff",
         "ms-python.debugpy",
-        "ms-toolsai.jupyter",
-        "ms-toolsai.jupyter-renderers",
-        "eamodio.gitlens"
+        "tamasfe.even-better-toml"
       ],
       "settings": {
         "python.defaultInterpreterPath": "/usr/local/bin/python",
@@ -46,12 +31,14 @@
           "**/.pyc": true,
           "**/.venv": true,
           "**/venv": true,
-          "**/.pytest_cache": true
+          "**/.pytest_cache": true,
+          "**/experiments/artifacts": true
         },
         "files.watcherExclude": {
           "**/__pycache__/**": true,
           "**/.venv/**": true,
-          "**/venv/**": true
+          "**/venv/**": true,
+          "**/experiments/artifacts/**": true
         },
         "git.enableSmartCommit": true,
         "terminal.integrated.defaultProfile.linux": "bash"
@@ -59,10 +46,9 @@
     }
   },
   "remoteEnv": {
-    "PYTHONPATH": "${containerWorkspaceFolder}",
+    "PYTHONPATH": "${containerWorkspaceFolder}/synthenexa_pipeline",
     "PYTHONDONTWRITEBYTECODE": "1",
-    "OLLAMA_MODEL": "nemotron-3-super:cloud",
-    "OLLAMA_BASE_URL": "http://localhost:11434"
+    "OLLAMA_BASE_URL": "http://host.docker.internal:11434"
   },
   "remoteUser": "vscode"
 }
