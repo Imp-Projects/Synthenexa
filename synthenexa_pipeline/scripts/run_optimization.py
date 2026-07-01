@@ -7,43 +7,42 @@ Usage (run from the synthenexa_pipeline/ directory):
     python scripts/run_optimization.py --policy epsilon_greedy --epsilon 0.2
     python scripts/run_optimization.py --model cogito:3b --generations 2
 """
+
 import argparse
 import json
 import os
+import re
 import sys
 import uuid
 
 # ── Ensure synthenexa_pipeline/ is on sys.path so bare imports work ─────────
-_HERE       = os.path.dirname(os.path.abspath(__file__))          # scripts/
-_PIPELINE   = os.path.dirname(_HERE)                               # synthenexa_pipeline/
+_HERE = os.path.dirname(os.path.abspath(__file__))  # scripts/
+_PIPELINE = os.path.dirname(_HERE)  # synthenexa_pipeline/
 if _PIPELINE not in sys.path:
     sys.path.insert(0, _PIPELINE)
 # ─────────────────────────────────────────────────────────────────────────────
 
-from core.config import (
-    MODEL_NAME, NUM_MUTATIONS, MAX_WORKERS, DATASET_PATH, ExperimentConfig, RLConfig
-)
+import requests
+from core.config import DATASET_PATH, MODEL_NAME, NUM_MUTATIONS, RLConfig
 from core.context import PipelineContext
 from core.schema import PromptCandidate
-
+from pipeline.prompt_evolution.policies.registry import PolicyRegistry
+from pipeline.prompt_evolution.stages.evaluation import EvaluationStage
+from pipeline.prompt_evolution.stages.execution import ExecutionStage
+from pipeline.prompt_evolution.stages.mutation import MutationStage
+from pipeline.prompt_evolution.stages.scoring import ScoringStage
+from pipeline.prompt_evolution.stages.selection import SelectionStage
+from pipeline.prompt_evolution.workflow import PromptEvolutionWorkflow
 from services.dataset_service import DatasetService
 from services.eval_service import EvalService
 from services.llm_service import LLMService
 from services.storage import StorageService
 from services.tracker import RLTracker
 
-from pipeline.prompt_evolution.workflow import PromptEvolutionWorkflow
-from pipeline.prompt_evolution.stages.mutation import MutationStage
-from pipeline.prompt_evolution.stages.execution import ExecutionStage
-from pipeline.prompt_evolution.stages.evaluation import EvaluationStage
-from pipeline.prompt_evolution.stages.scoring import ScoringStage
-from pipeline.prompt_evolution.stages.selection import SelectionStage
-from pipeline.prompt_evolution.policies.registry import PolicyRegistry
-
-
 # ------------------------------------------------------------------ #
 #  Helpers                                                            #
 # ------------------------------------------------------------------ #
+
 
 def _load_base_prompt(path: str) -> PromptCandidate:
     """Load the base prompt from a JSONL file (first record wins)."""
@@ -67,118 +66,156 @@ def _load_base_prompt(path: str) -> PromptCandidate:
 
 def _print_reward_table(reward_history: dict) -> None:
     """Print a formatted reward-per-generation table."""
-    print("\n" + "="*50)
+    print("\n" + "=" * 50)
     print("  Reward History")
-    print("="*50)
+    print("=" * 50)
     print(f"  {'Gen':>5}  {'Best Score':>12}")
-    print(f"  {'-'*5}  {'-'*12}")
+    print(f"  {'-' * 5}  {'-' * 12}")
     for gen, score in sorted(reward_history.items()):
         bar = "█" * int(score * 20)
         print(f"  {gen:>5}  {score:>12.4f}  {bar}")
-    print("="*50)
+    print("=" * 50)
 
 
-# ------------------------------------------------------------------ #
-#  Main                                                               #
-# ------------------------------------------------------------------ #
+def _available_ollama_models(base_url: str = None) -> list[str]:
+    """Return the list of installed Ollama models discovered from the local API."""
+    candidate_urls = []
+    if base_url:
+        candidate_urls.append(base_url)
+    for env_name in ("OLLAMA_BASE_URL", "OLLAMA_API_BASE"):
+        value = os.getenv(env_name)
+        if value and value not in candidate_urls:
+            candidate_urls.append(value)
+    for fallback in ("http://localhost:11434", "http://127.0.0.1:11434", "http://host.docker.internal:11434"):
+        if fallback not in candidate_urls:
+            candidate_urls.append(fallback)
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Synthenexa — RL-based prompt optimization pipeline."
-    )
-    parser.add_argument(
-        "--generations", type=int, default=3,
-        help="Number of evolution generations to run (default: 3)."
-    )
-    parser.add_argument(
-        "--mutations", type=int, default=NUM_MUTATIONS,
-        help=f"Number of prompt mutations per generation (default: {NUM_MUTATIONS})."
-    )
-    parser.add_argument(
-        "--model", type=str, default=MODEL_NAME,
-        help=f"Ollama model to use (default: {MODEL_NAME})."
-    )
-    parser.add_argument(
-        "--policy", type=str, default="greedy",
-        choices=["greedy", "epsilon_greedy"],
-        help="Selection policy (default: greedy)."
-    )
-    parser.add_argument(
-        "--epsilon", type=float, default=0.1,
-        help="Epsilon for epsilon-greedy policy (default: 0.1)."
-    )
-    parser.add_argument(
-        "--dataset", type=str, default=DATASET_PATH,
-        help=f"Path to MBPP micro dataset (default: {DATASET_PATH})."
-    )
-    parser.add_argument(
-        "--experiment", type=str, default="",
-        help="Experiment name (used for artifact directory naming)."
-    )
-    args = parser.parse_args()
+    for url in candidate_urls:
+        try:
+            response = requests.get(f"{url.rstrip('/')}/api/tags", timeout=5)
+            response.raise_for_status()
+            models = response.json().get("models", [])
+            names = []
+            for model in models:
+                name = (model.get("name") or model.get("model") or "").strip()
+                if name:
+                    names.append(name)
+            if names:
+                return names
+        except Exception as exc:
+            print(f"[run_optimization] Could not query Ollama at {url}: {exc}")
+    return []
 
-    run_id = str(uuid.uuid4())[:8]
-    experiment_name = args.experiment or f"run_{run_id}"
 
-    print(f"\n{'='*60}")
-    print(f"  Synthenexa — Prompt Evolution Pipeline")
-    print(f"{'='*60}")
+def _safe_name(model_name: str) -> str:
+    """Create a filesystem-safe experiment name from a model identifier."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", model_name).strip("._-")
+
+
+def _resolve_model_list(args) -> list[str]:
+    """Resolve a list of models from CLI flags and the local Ollama registry."""
+    excluded = {item.strip() for item in (getattr(args, "exclude_models", "") or "").split(",") if item.strip()}
+    excluded.update(item.strip() for item in os.getenv("OLLAMA_EXCLUDED_MODELS", "").split(",") if item.strip())
+
+    if getattr(args, "available_models", False):
+        available = _available_ollama_models(getattr(args, "ollama_base_url", None))
+        resolved = []
+        for model_name in available:
+            if model_name in excluded or model_name in resolved:
+                continue
+            resolved.append(model_name)
+        return resolved or [getattr(args, "model", MODEL_NAME)]
+
+    if getattr(args, "models", "").strip():
+        resolved = []
+        for model_name in getattr(args, "models", "").split(","):
+            clean_name = model_name.strip()
+            if clean_name and clean_name not in excluded and clean_name not in resolved:
+                resolved.append(clean_name)
+        return resolved
+
+    return [getattr(args, "model", MODEL_NAME)]
+
+
+def _print_comparison_table(results: list[dict]) -> None:
+    """Print a simple comparison table for multi-model runs."""
+    print("\n" + "=" * 80)
+    print("  Model Comparison")
+    print("=" * 80)
+    print(f"  {'Model':<20} {'Best Score':>12} {'Experiment':<30}")
+    print(f"  {'-' * 20} {'-' * 12} {'-' * 30}")
+    for entry in sorted(results, key=lambda item: item.get("best_score", 0.0), reverse=True):
+        print(
+            f"  {entry.get('model', 'unknown'):<20} "
+            f"{entry.get('best_score', 0.0):>12.4f} {entry.get('experiment', 'unknown'):<30}"
+        )
+    print("=" * 80)
+
+
+def _save_comparison_summary(name: str, results: list[dict], base_dir: str = None) -> str:
+    """Persist a JSON summary of multi-model comparison runs."""
+    base_dir = base_dir or os.path.join(_PIPELINE, "experiments", "artifacts")
+    target_dir = os.path.join(base_dir, name)
+    os.makedirs(target_dir, exist_ok=True)
+    path = os.path.join(target_dir, "summary.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(
+            sorted(results, key=lambda item: item.get("best_score", 0.0), reverse=True),
+            handle,
+            indent=2,
+        )
+    return path
+
+
+def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: str) -> dict:
+    """Run the prompt-evolution workflow for one model and return a summary record."""
+    print(f"\n{'=' * 60}")
+    print("  Synthenexa — Prompt Evolution Pipeline")
+    print(f"{'=' * 60}")
     print(f"  Run ID:       {run_id}")
-    print(f"  Model:        {args.model}")
+    print(f"  Model:        {model_name}")
     print(f"  Generations:  {args.generations}")
     print(f"  Mutations:    {args.mutations}")
-    print(f"  Policy:       {args.policy}" + (
-        f" (ε={args.epsilon})" if args.policy == "epsilon_greedy" else ""
-    ))
+    print(f"  Policy:       {args.policy}" + (f" (ε={args.epsilon})" if args.policy == "epsilon_greedy" else ""))
     print(f"  Dataset:      {args.dataset}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
-    # ── 1. Load dataset ──────────────────────────────────────────────
     dataset_path = args.dataset
     if not os.path.isabs(dataset_path):
         dataset_path = os.path.join(_PIPELINE, dataset_path)
 
     tasks = DatasetService.load_dataset(dataset_path)
     if not tasks:
-        print(f"ERROR: No tasks loaded from '{dataset_path}'. Aborting.")
-        sys.exit(1)
+        raise RuntimeError(f"No tasks loaded from '{dataset_path}'.")
     print(f"Loaded {len(tasks)} tasks from dataset.\n")
 
-    # ── 2. Load base prompt ──────────────────────────────────────────
     base_prompt_path = os.path.join(_PIPELINE, "Dataset", "base_prompt.jsonl")
     base_prompt = _load_base_prompt(base_prompt_path)
     print(f"Base prompt: {base_prompt.text!r}\n")
 
-    # ── 3. Wire up services ──────────────────────────────────────────
-    llm_service  = LLMService(model=args.model)
+    llm_service = LLMService(model=model_name, base_url=args.ollama_base_url)
     eval_service = EvalService()
-    storage      = StorageService(
-        base_dir=os.path.join(_PIPELINE, "experiments", "artifacts", experiment_name)
-    )
-    tracker      = RLTracker()
+    storage = StorageService(base_dir=os.path.join(_PIPELINE, "experiments", "artifacts", experiment_name))
+    tracker = RLTracker()
 
-    # ── 4. Build selection policy ────────────────────────────────────
     rl_config = RLConfig(policy_type=args.policy, epsilon=args.epsilon)
-    policy    = PolicyRegistry.get_policy(rl_config)
+    policy = PolicyRegistry.get_policy(rl_config)
 
-    # ── 5. Build DAG stages ──────────────────────────────────────────
     stages = [
-        MutationStage(llm_service=llm_service,  num_mutations=args.mutations),
+        MutationStage(llm_service=llm_service, num_mutations=args.mutations),
         ExecutionStage(llm_service=llm_service),
         EvaluationStage(eval_service=eval_service),
         ScoringStage(),
         SelectionStage(policy=policy),
     ]
 
-    # ── 6. Initialise context ────────────────────────────────────────
     context = PipelineContext(
-        model_name=args.model,
+        model_name=model_name,
         run_id=run_id,
         base_prompt=base_prompt,
         tasks=tasks,
     )
 
-    # ── 7. Run the workflow ──────────────────────────────────────────
     workflow = PromptEvolutionWorkflow(
         context=context,
         stages=stages,
@@ -189,10 +226,9 @@ def main():
 
     final_context = workflow.run(generations=args.generations)
 
-    # ── 8. Print results ─────────────────────────────────────────────
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("  Optimization Complete!")
-    print("="*60)
+    print("=" * 60)
     if final_context.best_prompt:
         print(f"\n  Best Prompt (score={final_context.best_score:.4f}):")
         print(f"  {final_context.best_prompt.text}")
@@ -201,25 +237,100 @@ def main():
 
     _print_reward_table(final_context.reward_history)
 
-    # Save the final best prompt to a well-known file
-    best_path = os.path.join(
-        _PIPELINE, "experiments", "artifacts", experiment_name, "best_prompt.json"
-    )
+    best_path = os.path.join(_PIPELINE, "experiments", "artifacts", experiment_name, "best_prompt.json")
     if final_context.best_prompt:
-        with open(best_path, "w", encoding="utf-8") as f:
+        with open(best_path, "w", encoding="utf-8") as handle:
             json.dump(
                 {
-                    "run_id":    run_id,
-                    "model":     args.model,
+                    "run_id": run_id,
+                    "model": model_name,
                     "prompt_id": final_context.best_prompt.id,
-                    "text":      final_context.best_prompt.text,
-                    "score":     final_context.best_score,
+                    "text": final_context.best_prompt.text,
+                    "score": final_context.best_score,
                     "reward_history": final_context.reward_history,
                 },
-                f,
+                handle,
                 indent=2,
             )
         print(f"\n  Best prompt saved → {best_path}")
+
+    return {
+        "model": model_name,
+        "experiment": experiment_name,
+        "best_score": final_context.best_score,
+        "best_prompt": final_context.best_prompt.text if final_context.best_prompt else "",
+        "best_prompt_id": final_context.best_prompt.id if final_context.best_prompt else "",
+        "reward_history": final_context.reward_history,
+    }
+
+
+# ------------------------------------------------------------------ #
+#  Main                                                               #
+# ------------------------------------------------------------------ #
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Synthenexa — RL-based prompt optimization pipeline.")
+    parser.add_argument(
+        "--generations", type=int, default=3, help="Number of evolution generations to run (default: 3)."
+    )
+    parser.add_argument(
+        "--mutations",
+        type=int,
+        default=NUM_MUTATIONS,
+        help=f"Number of prompt mutations per generation (default: {NUM_MUTATIONS}).",
+    )
+    parser.add_argument("--model", type=str, default=MODEL_NAME, help=f"Ollama model to use (default: {MODEL_NAME}).")
+    parser.add_argument(
+        "--models", type=str, default="", help="Comma-separated list of models to evaluate sequentially."
+    )
+    parser.add_argument(
+        "--available-models",
+        action="store_true",
+        help="Run the workflow against all Ollama models currently available locally.",
+    )
+    parser.add_argument("--exclude-models", type=str, default="", help="Comma-separated list of models to skip.")
+    parser.add_argument(
+        "--ollama-base-url",
+        type=str,
+        default=os.getenv("OLLAMA_BASE_URL") or os.getenv("OLLAMA_API_BASE") or "http://localhost:11434",
+        help="Ollama base URL (default: env or localhost).",
+    )
+    parser.add_argument(
+        "--policy",
+        type=str,
+        default="greedy",
+        choices=["greedy", "epsilon_greedy"],
+        help="Selection policy (default: greedy).",
+    )
+    parser.add_argument("--epsilon", type=float, default=0.1, help="Epsilon for epsilon-greedy policy (default: 0.1).")
+    parser.add_argument(
+        "--dataset", type=str, default=DATASET_PATH, help=f"Path to MBPP micro dataset (default: {DATASET_PATH})."
+    )
+    parser.add_argument(
+        "--experiment", type=str, default="", help="Experiment name (used for artifact directory naming)."
+    )
+    args = parser.parse_args()
+
+    run_id = str(uuid.uuid4())[:8]
+    model_names = _resolve_model_list(args)
+    if not model_names:
+        model_names = [args.model]
+
+    comparison_results = []
+    for index, model_name in enumerate(model_names):
+        experiment_name = args.experiment or f"run_{run_id}"
+        if len(model_names) > 1:
+            experiment_name = f"{experiment_name}_{_safe_name(model_name)}"
+        if index > 0:
+            run_id = str(uuid.uuid4())[:8]
+        result = _run_single_experiment(args, model_name, run_id, experiment_name)
+        comparison_results.append(result)
+
+    if len(comparison_results) > 1:
+        _print_comparison_table(comparison_results)
+        summary_path = _save_comparison_summary(args.experiment or f"run_{run_id}", comparison_results)
+        print(f"\nComparison summary written to {summary_path}")
 
 
 if __name__ == "__main__":

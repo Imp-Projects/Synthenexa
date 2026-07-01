@@ -4,6 +4,11 @@
     "dockerfile": "Dockerfile",
     "context": ".."
   },
+
+    "runArgs": [
+    "--add-host=host.docker.internal:host-gateway"
+  ],
+  
   "postCreateCommand": "pip install -r requirements.txt",
   "customizations": {
     "vscode": {
@@ -24,8 +29,6 @@
             "source.organizeImports": "explicit"
           }
         },
-        "ruff.lint.args": ["--line-length=120"],
-        "ruff.format.args": ["--line-length=120"],
         "files.exclude": {
           "**/__pycache__": true,
           "**/.pyc": true,
