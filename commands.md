@@ -8,8 +8,7 @@ pytest -q tests/services/test_llm_factory.py tests/services/test_llm_service.py 
 pytest -q
 
 # Single-model smoke test
-python synthenexa_pipeline/scripts/run_optimization.py --model openai:gpt-4o-mini --generations 1 --mutations 1 --experiment smoke_single
-
+g
 # Single-model exploratory run (epsilon-greedy)
 python synthenexa_pipeline/scripts/run_optimization.py --model openai:gpt-4o-mini --generations 2 --mutations 3 --policy epsilon_greedy --epsilon 0.2 --experiment epsilon_smoke
 
