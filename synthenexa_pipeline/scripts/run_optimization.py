@@ -6,6 +6,17 @@ Usage (run from the synthenexa_pipeline/ directory):
     python scripts/run_optimization.py --generations 5 --mutations 3
     python scripts/run_optimization.py --policy epsilon_greedy --epsilon 0.2
     python scripts/run_optimization.py --model cogito:3b --generations 2
+
+Model priority order (highest capability first):
+    Tier 1 — OpenAI  : openai:gpt-4o, openai:gpt-4o-mini, openai:o3-mini
+    Tier 2 — Gemini  : gemini:gemini-2.0-flash, gemini:gemini-1.5-pro
+    Tier 3 — Nemotron: nemotron-3-super:cloud  (primary Ollama baseline)
+    Tier 4 — Ollama  : cogito:3b, qwen2.5:3b, qwen:latest, gemma4:latest
+
+Model name conventions:
+    openai:<name>   — Routes to OpenAI Chat Completions API
+    gemini:<name>   — Routes to Google Gemini API
+    <name>          — Routes to local Ollama instance
 """
 
 import argparse
@@ -23,6 +34,8 @@ if _PIPELINE not in sys.path:
 # ─────────────────────────────────────────────────────────────────────────────
 
 import requests
+from alembic.config import Config
+from alembic import command
 from core.config import DATASET_PATH, MODEL_NAME, NUM_MUTATIONS, RLConfig
 from core.context import PipelineContext
 from core.schema import PromptCandidate
@@ -35,6 +48,7 @@ from pipeline.prompt_evolution.stages.selection import SelectionStage
 from pipeline.prompt_evolution.workflow import PromptEvolutionWorkflow
 from services.dataset_service import DatasetService
 from services.eval_service import EvalService
+from services.llm.registry import ModelRegistry, _infer_priority, normalize_model_name
 from services.llm_service import LLMService
 from services.storage import StorageService
 from services.tracker import RLTracker
@@ -42,6 +56,29 @@ from services.tracker import RLTracker
 # ------------------------------------------------------------------ #
 #  Helpers                                                            #
 # ------------------------------------------------------------------ #
+
+
+def init_database():
+    """Run Alembic migrations to initialize database schema."""
+    migrations_dir = os.path.join(_PIPELINE, "migrations")
+    alembic_ini = os.path.join(migrations_dir, "alembic.ini")
+    
+    if not os.path.exists(alembic_ini):
+        print(f"[ERROR] Alembic configuration not found at {alembic_ini}")
+        return False
+    
+    try:
+        alembic_cfg = Config(alembic_ini)
+        # Set the script location relative to the migrations directory
+        alembic_cfg.set_main_option("script_location", migrations_dir)
+        
+        print("[INFO] Running database migrations...")
+        command.upgrade(alembic_cfg, "head")
+        print("[INFO] Database migrations completed successfully.")
+        return True
+    except Exception as e:
+        print(f"[ERROR] Failed to run database migrations: {e}")
+        return False
 
 
 def _load_base_prompt(path: str) -> PromptCandidate:
@@ -107,34 +144,100 @@ def _available_ollama_models(base_url: str = None) -> list[str]:
     return []
 
 
+def _priority_sorted_models(
+    models: list[str],
+    excluded: set[str],
+    registry: ModelRegistry,
+) -> list[str]:
+    """Sort a model list by priority tier (1=highest) then by original order within each tier.
+
+    Priority tiers:
+        1 — OpenAI models     (openai:*)
+        2 — Gemini models     (gemini:*)
+        3 — Nemotron cloud    (nemotron-3-super:cloud)
+        4 — Other Ollama      (all remaining local models)
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for name in models:
+        norm = normalize_model_name(name)
+        if norm in excluded or norm in seen:
+            continue
+        seen.add(norm)
+        result.append(norm)
+    # Capture original insertion order before sorting for stable secondary key
+    original_order = {name: idx for idx, name in enumerate(result)}
+    result.sort(key=lambda m: (registry.get(m).priority, original_order[m]))
+    return result
+
+
+
 def _safe_name(model_name: str) -> str:
     """Create a filesystem-safe experiment name from a model identifier."""
     return re.sub(r"[^A-Za-z0-9._-]+", "_", model_name).strip("._-")
 
 
 def _resolve_model_list(args) -> list[str]:
-    """Resolve a list of models from CLI flags and the local Ollama registry."""
-    excluded = {item.strip() for item in (getattr(args, "exclude_models", "") or "").split(",") if item.strip()}
-    excluded.update(item.strip() for item in os.getenv("OLLAMA_EXCLUDED_MODELS", "").split(",") if item.strip())
+    """Resolve a priority-sorted list of models from CLI flags.
+
+    Priority order: OpenAI (1) → Gemini (2) → Nemotron (3) → Ollama (4).
+
+    When --available-models is used:
+      - Cloud API models (OpenAI, Gemini) are included if their API keys are set
+        and --no-openai / --no-gemini flags are absent
+      - Locally available Ollama models are appended after cloud models
+      - The full list is then priority-sorted
+    """
+    excluded: set[str] = {item.strip() for item in (getattr(args, "exclude_models", "") or "").split(",") if item.strip()}
+    registry = ModelRegistry()
 
     if getattr(args, "available_models", False):
-        available = _available_ollama_models(getattr(args, "ollama_base_url", None))
-        resolved = []
-        for model_name in available:
-            if model_name in excluded or model_name in resolved:
-                continue
-            resolved.append(model_name)
-        return resolved or [getattr(args, "model", MODEL_NAME)]
+        candidates: list[str] = []
+
+        # Tier 1 — OpenAI (include if API key present and not suppressed)
+        if not getattr(args, "no_openai", False) and os.getenv("OPENAI_API_KEY"):
+            openai_models = [
+                m for m in os.getenv(
+                    "OPENAI_MODEL_LIST",
+                    "openai:gpt-4o,openai:gpt-4o-mini",
+                ).split(",")
+                if m.strip()
+            ]
+            candidates.extend(openai_models)
+            print(f"[run_optimization] OpenAI key found — adding {len(openai_models)} OpenAI model(s).")
+        else:
+            print("[run_optimization] OpenAI skipped (no OPENAI_API_KEY or --no-openai set).")
+
+        # Tier 2 — Gemini (include if API key present and not suppressed)
+        if not getattr(args, "no_gemini", False) and os.getenv("GEMINI_API_KEY"):
+            gemini_models = [
+                m for m in os.getenv(
+                    "GEMINI_MODEL_LIST",
+                    "gemini:gemini-2.0-flash,gemini:gemini-1.5-pro",
+                ).split(",")
+                if m.strip()
+            ]
+            candidates.extend(gemini_models)
+            print(f"[run_optimization] Gemini key found — adding {len(gemini_models)} Gemini model(s).")
+        else:
+            print("[run_optimization] Gemini skipped (no GEMINI_API_KEY or --no-gemini set).")
+
+        # Tiers 3 & 4 — Ollama local models
+        ollama_models = _available_ollama_models(getattr(args, "ollama_base_url", None))
+        if ollama_models:
+            print(f"[run_optimization] Ollama available — adding {len(ollama_models)} local model(s).")
+        else:
+            print("[run_optimization] Ollama unavailable or no models found.")
+        candidates.extend(ollama_models)
+
+        sorted_models = _priority_sorted_models(candidates, excluded, registry)
+        return sorted_models or [getattr(args, "model", MODEL_NAME)]
 
     if getattr(args, "models", "").strip():
-        resolved = []
-        for model_name in getattr(args, "models", "").split(","):
-            clean_name = model_name.strip()
-            if clean_name and clean_name not in excluded and clean_name not in resolved:
-                resolved.append(clean_name)
-        return resolved
+        candidates = [m.strip() for m in getattr(args, "models", "").split(",") if m.strip()]
+        return _priority_sorted_models(candidates, excluded, registry)
 
-    return [getattr(args, "model", MODEL_NAME)]
+    return [normalize_model_name(getattr(args, "model", MODEL_NAME))]
 
 
 def _print_comparison_table(results: list[dict]) -> None:
@@ -280,16 +383,38 @@ def main():
         default=NUM_MUTATIONS,
         help=f"Number of prompt mutations per generation (default: {NUM_MUTATIONS}).",
     )
-    parser.add_argument("--model", type=str, default=MODEL_NAME, help=f"Ollama model to use (default: {MODEL_NAME}).")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=MODEL_NAME,
+        help=(
+            f"Model to use (default: {MODEL_NAME}). "
+            "Use 'openai:<name>' for OpenAI, 'gemini:<name>' for Gemini, "
+            "or a bare name for Ollama."
+        ),
+    )
     parser.add_argument(
         "--models", type=str, default="", help="Comma-separated list of models to evaluate sequentially."
     )
     parser.add_argument(
         "--available-models",
         action="store_true",
-        help="Run the workflow against all Ollama models currently available locally.",
+        help=(
+            "Run the workflow against all available models in priority order: "
+            "OpenAI (if OPENAI_API_KEY set) → Gemini (if GEMINI_API_KEY set) → Ollama local models."
+        ),
     )
     parser.add_argument("--exclude-models", type=str, default="", help="Comma-separated list of models to skip.")
+    parser.add_argument(
+        "--no-openai",
+        action="store_true",
+        help="Exclude OpenAI models even when OPENAI_API_KEY is set (useful with --available-models).",
+    )
+    parser.add_argument(
+        "--no-gemini",
+        action="store_true",
+        help="Exclude Gemini models even when GEMINI_API_KEY is set (useful with --available-models).",
+    )
     parser.add_argument(
         "--ollama-base-url",
         type=str,
@@ -310,7 +435,21 @@ def main():
     parser.add_argument(
         "--experiment", type=str, default="", help="Experiment name (used for artifact directory naming)."
     )
+    parser.add_argument(
+        "--init-db",
+        action="store_true",
+        help="Initialize database schema by running Alembic migrations."
+    )
     args = parser.parse_args()
+
+    # Handle database initialization
+    if args.init_db:
+        if init_database():
+            print("[INFO] Database initialization completed.")
+            sys.exit(0)
+        else:
+            print("[ERROR] Database initialization failed.")
+            sys.exit(1)
 
     run_id = str(uuid.uuid4())[:8]
     model_names = _resolve_model_list(args)
