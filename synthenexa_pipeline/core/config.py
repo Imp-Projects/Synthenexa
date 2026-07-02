@@ -11,6 +11,7 @@ from typing import Dict, Optional
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import DeclarativeBase
 
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 load_dotenv(os.path.join(ROOT_DIR, ".env"), override=False)
@@ -34,12 +35,25 @@ DEFAULT_SUPPORTED_MODELS = [
     ).split(",")
     if item.strip()
 ]
-DEFAULT_EXCLUDED_MODELS = [item.strip() for item in os.getenv("OLLAMA_EXCLUDED_MODELS", "").split(",") if item.strip()]
+
+
+# PostgreSQL configuration
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
+POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "synthenexa")
+POSTGRES_USER = os.getenv("POSTGRES_USER", "synthenexa")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "synthenexa")
 
 
 # ------------------------------------------------------------------ #
 #  Pydantic config classes (structured / serialisable)               #
-# ------------------------------------------------------------------ #
+# ------------------------------------------------------------------
+
+
+# SQLAlchemy Base class for ORM models
+class Base(DeclarativeBase):
+    """Base class for all SQLAlchemy ORM models."""
+    pass
 
 
 class ModelConfig(BaseModel):
@@ -79,6 +93,17 @@ class RLConfig(BaseModel):
     )
 
 
+class DatabaseConfig(BaseModel):
+    """Configuration for PostgreSQL database connection."""
+    host: str = POSTGRES_HOST
+    port: int = int(POSTGRES_PORT)
+    database: str = POSTGRES_DB
+    user: str = POSTGRES_USER
+    password: str = POSTGRES_PASSWORD
+    pool_size: int = 5
+    max_overflow: int = 10
+
+
 class ExperimentConfig(BaseModel):
     experiment_name: str = "default_run"
     dataset_path: str = DATASET_PATH
@@ -88,6 +113,7 @@ class ExperimentConfig(BaseModel):
     mutation: MutationConfig = Field(default_factory=MutationConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     rl: RLConfig = Field(default_factory=RLConfig)
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
 
     def to_json(self) -> str:
         return self.model_dump_json(indent=4)
