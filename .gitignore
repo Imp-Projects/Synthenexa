@@ -1,6 +1,5 @@
 # Environment
-# .env is now committed with default values for local development
-# .env.example removed - using single .env file
+.env 
 
 # Virtual environment
 venv/
