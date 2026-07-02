@@ -1,9 +1,8 @@
 {
   "name": "Synthenexa",
-  "build": {
-    "dockerfile": "Dockerfile",
-    "context": ".."
-  },
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "app",
+  "workspaceFolder": "/workspaces/Synthenexa",
 
     "runArgs": [
     "--add-host=host.docker.internal:host-gateway"
@@ -51,7 +50,8 @@
   "remoteEnv": {
     "PYTHONPATH": "${containerWorkspaceFolder}/synthenexa_pipeline",
     "PYTHONDONTWRITEBYTECODE": "1",
-    "OLLAMA_BASE_URL": "http://host.docker.internal:11434"
+    "OLLAMA_BASE_URL": "http://host.docker.internal:22000",
+    "POSTGRES_HOST": "db"
   },
   "remoteUser": "vscode"
 }
