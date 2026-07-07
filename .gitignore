@@ -19,6 +19,9 @@ Thumbs.db
 # Generated pipeline datasets and evaluation outputs
 synthenexa_pipeline/Dataset/*
 !synthenexa_pipeline/Dataset/benchmark_mbpp_micro.jsonl
+!synthenexa_pipeline/Dataset/benchmark_mbpp_mini_a.jsonl
+!synthenexa_pipeline/Dataset/benchmark_mbpp_mini_b.jsonl
+!synthenexa_pipeline/Dataset/benchmark_mbpp_mini_c.jsonl
 
 ollama.log
 
