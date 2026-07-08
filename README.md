@@ -1,7 +1,5 @@
 # Synthenexa
 
-> **Prototype Objective:** Design a system that automatically refines user prompts for better results across LLMs.
-
 ---
 
 ## What is this project?
