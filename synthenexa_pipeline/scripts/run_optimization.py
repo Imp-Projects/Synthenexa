@@ -36,7 +36,7 @@ if _PIPELINE not in sys.path:
 import requests
 from alembic.config import Config
 from alembic import command
-from core.config import DATASET_PATH, MODEL_NAME, NUM_MUTATIONS, RLConfig
+from core.config import DATASET_PATH, MODEL_NAME, NUM_MUTATIONS, RLConfig, STORAGE_BACKEND
 from core.context import PipelineContext
 from core.schema import PromptCandidate
 from pipeline.prompt_evolution.policies.registry import PolicyRegistry
@@ -298,7 +298,19 @@ def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: 
 
     llm_service = LLMService(model=model_name, base_url=args.ollama_base_url)
     eval_service = EvalService()
-    storage = StorageService(base_dir=os.path.join(_PIPELINE, "experiments", "artifacts", experiment_name))
+    # Resolve storage backend: CLI flag → env var → default "file"
+    storage_backend = getattr(args, "storage", None) or STORAGE_BACKEND
+    storage = StorageService(
+        base_dir=os.path.join(_PIPELINE, "experiments", "artifacts", experiment_name),
+        backend=storage_backend,
+    )
+    # Create the experiment record (no-op for file backend)
+    storage.create_experiment_record(
+        run_id=run_id,
+        model_name=model_name,
+        experiment_name=experiment_name,
+        config_dict={"generations": args.generations, "mutations": args.mutations, "policy": args.policy},
+    )
     tracker = RLTracker()
 
     rl_config = RLConfig(policy_type=args.policy, epsilon=args.epsilon)
@@ -329,6 +341,12 @@ def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: 
 
     final_context = workflow.run(generations=args.generations)
 
+    # Finalise the experiment record (no-op for file backend)
+    storage.finalize_experiment(
+        best_prompt=final_context.best_prompt,
+        best_score=final_context.best_score,
+    )
+
     print("\n" + "=" * 60)
     print("  Optimization Complete!")
     print("=" * 60)
@@ -340,8 +358,11 @@ def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: 
 
     _print_reward_table(final_context.reward_history)
 
+    should_export = getattr(args, "export_artifacts", False) or storage_backend == "file"
+
     best_path = os.path.join(_PIPELINE, "experiments", "artifacts", experiment_name, "best_prompt.json")
-    if final_context.best_prompt:
+    if final_context.best_prompt and should_export:
+        os.makedirs(os.path.dirname(best_path), exist_ok=True)
         with open(best_path, "w", encoding="utf-8") as handle:
             json.dump(
                 {
@@ -436,9 +457,25 @@ def main():
         "--experiment", type=str, default="", help="Experiment name (used for artifact directory naming)."
     )
     parser.add_argument(
+        "--storage",
+        type=str,
+        default=None,
+        choices=["file", "postgres"],
+        help=(
+            "Storage backend to use: 'file' (default) writes JSON/JSONL artifacts; "
+            "'postgres' writes to the configured PostgreSQL database. "
+            "Overrides the STORAGE_BACKEND env var."
+        ),
+    )
+    parser.add_argument(
         "--init-db",
         action="store_true",
         help="Initialize database schema by running Alembic migrations."
+    )
+    parser.add_argument(
+        "--export-artifacts",
+        action="store_true",
+        help="Export JSON artifact reports (e.g., best_prompt.json, summary.json). Default is False unless using 'file' storage."
     )
     args = parser.parse_args()
 
@@ -468,8 +505,11 @@ def main():
 
     if len(comparison_results) > 1:
         _print_comparison_table(comparison_results)
-        summary_path = _save_comparison_summary(args.experiment or f"run_{run_id}", comparison_results)
-        print(f"\nComparison summary written to {summary_path}")
+        storage_backend = getattr(args, "storage", None) or STORAGE_BACKEND
+        should_export = getattr(args, "export_artifacts", False) or storage_backend == "file"
+        if should_export:
+            summary_path = _save_comparison_summary(args.experiment or f"run_{run_id}", comparison_results)
+            print(f"\nComparison summary written to {summary_path}")
 
 
 if __name__ == "__main__":
