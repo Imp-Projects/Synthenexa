@@ -1,0 +1,3 @@
+#!/bin/bash
+echo "Auto-pushing to GitHub..."
+git push origin HEAD

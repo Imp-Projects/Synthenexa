@@ -27,3 +27,6 @@ ollama.log
 
 # Experiments artifacts
 synthenexa_pipeline/experiments/artifacts/
+
+# Documentation
+docs/
