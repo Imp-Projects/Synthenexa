@@ -1,6 +1,7 @@
 version: "3.8"
 services:
   app:
+    image: ghcr.io/imp-projects/synthenexa-devcontainer:latest
     build:
       context: ..
       dockerfile: .devcontainer/Dockerfile
