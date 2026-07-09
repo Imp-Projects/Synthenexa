@@ -5,6 +5,7 @@
 # Virtual environment
 venv/
 .venv/
+.venv-win/
 
 # Python cache
 __pycache__/
