@@ -44,6 +44,9 @@ POSTGRES_DB = os.getenv("POSTGRES_DB", "synthenexa")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "synthenexa")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "synthenexa")
 
+# Storage backend selection: "file" (default) or "postgres"
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "file")
+
 
 # ------------------------------------------------------------------ #
 #  Pydantic config classes (structured / serialisable)               #
