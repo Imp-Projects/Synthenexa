@@ -1,0 +1,9 @@
+{
+  "include": ["synthenexa_pipeline", "tests"],
+  "extraPaths": ["synthenexa_pipeline"],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "basic",
+  "useLibraryCodeForTypes": true,
+  "reportMissingImports": "warning",
+  "reportMissingModuleSource": "none"
+}

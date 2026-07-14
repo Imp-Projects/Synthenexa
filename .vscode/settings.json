@@ -1,0 +1,11 @@
+{
+  "python.analysis.extraPaths": [
+    "synthenexa_pipeline"
+  ],
+  "python.analysis.typeCheckingMode": "basic",
+  "python.testing.pytestEnabled": true,
+  "python.testing.pytestArgs": [
+    "tests"
+  ],
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv-win/Scripts/python.exe"
+}

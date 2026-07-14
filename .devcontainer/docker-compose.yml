@@ -33,5 +33,17 @@ services:
       timeout: 5s
       retries: 10
 
+  pgadmin:
+    image: dpage/pgadmin4
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@synthenexa.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5051:80"
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   postgres_data:

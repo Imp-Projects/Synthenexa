@@ -1,9 +1,5 @@
 # Synthenexa
 
----
-
-## What is this project?
-
 Synthenexa is a prototype that tackles a practical problem in working with large language models: **the quality of the output depends heavily on how the prompt is written**, and writing effective prompts by hand is slow, inconsistent, and hard to optimise systematically.
 
 Instead of relying on manual prompt engineering, Synthenexa automates the refinement process. It starts with a base prompt, generates improved variations, tests how well each variation performs on a real task, and uses the results to produce an even better prompt in the next round. The process repeats until it converges on the most effective prompt it can find.
