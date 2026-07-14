@@ -4,6 +4,7 @@
 # Virtual environment
 venv/
 .venv/
+.venv-win/
 
 # Python cache
 __pycache__/
@@ -27,3 +28,4 @@ ollama.log
 
 # Experiments artifacts
 synthenexa_pipeline/experiments/artifacts/
+docs/
