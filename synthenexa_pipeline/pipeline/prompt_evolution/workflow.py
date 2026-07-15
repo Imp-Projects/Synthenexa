@@ -61,7 +61,16 @@ class PromptEvolutionWorkflow:
             ctx.generation = gen
             print(f"\n{'='*60}")
             print(f"  Generation {gen} / {generations}")
-            print(f"{'='*60}")
+            print(f"{'='*60}\n")
+            
+            if ctx.current_prompt:
+                print("Parent Prompt:")
+                print(f"  Source Model: {ctx.current_prompt.origin_model or 'base'}")
+                if ctx.current_prompt.id in ctx.scores:
+                    print(f"  Previous Score: {ctx.scores[ctx.current_prompt.id]:.4f}")
+                print("\nEvolving from:")
+                print(f"  {ctx.current_prompt.text[:120]!r}...")
+                print("-" * 60 + "\n")
 
             ctx = self.run_generation(ctx)
 

@@ -68,9 +68,14 @@ class MutationStage(Stage):
             candidate = PromptCandidate(
                 id=f"{context.current_prompt.id}_gen{context.generation}_m{i}",
                 text=mutated_text.strip(),
+                origin_model=self.llm_service.model,
+                generation=context.generation,
+                mutation_idx=i,
+                parent_id=context.current_prompt.id,
             )
             context.add_candidate(candidate)
-            print(f"  ✓ Variant {i}: {mutated_text[:80].strip()!r}...")
+            # Suppress default printing here, handled by EnsembleScoringStage later in a prettier way
+            # print(f"  ✓ Variant {i}: {mutated_text[:80].strip()!r}...")
 
-        print(f"[MutationStage] {len(context.candidate_prompts)} candidates ready.")
+        # print(f"[MutationStage] {len(context.candidate_prompts)} candidates ready.")
         return context

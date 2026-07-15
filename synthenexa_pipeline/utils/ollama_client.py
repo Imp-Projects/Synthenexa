@@ -8,9 +8,22 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).resolve().parents[2] / ".env", override=True)
 
 
+def get_ollama_base_url() -> str:
+    return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+
 def _chat_url() -> str:
-    base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
-    return f"{base}/api/chat"
+    return f"{get_ollama_base_url()}/api/chat"
+
+def get_available_ollama_models() -> list[str]:
+    try:
+        url = f"{get_ollama_base_url()}/api/tags"
+        resp = requests.get(url, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        return [m["name"] for m in data.get("models", [])]
+    except Exception as e:
+        print(f"[warn] Failed to fetch Ollama models: {e}")
+        return []
 
 
 def _groq_chat_url() -> str:

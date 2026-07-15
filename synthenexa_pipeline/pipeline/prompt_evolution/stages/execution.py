@@ -11,6 +11,7 @@ from core.schema import ExecutionResult
 from pipeline.prompt_evolution.stages.base import Stage
 from services.dataset_service import DatasetService
 from services.llm_service import LLMService
+import time
 
 
 class ExecutionStage(Stage):
@@ -30,6 +31,7 @@ class ExecutionStage(Stage):
 
         for candidate in context.candidate_prompts:
             results = []
+            start_time = time.perf_counter()
 
             for task in context.tasks:
                 task_id     = task.get("task_id", "unknown")
@@ -61,6 +63,7 @@ class ExecutionStage(Stage):
                 results.append(result)
 
             context.generated_codes[candidate.id] = results
-            print(f"  ✓ {candidate.id}: {len(results)} code outputs generated.")
+            elapsed_ms = (time.perf_counter() - start_time) * 1000
+            print(f"  ✓ {candidate.id}: {len(results)} code outputs generated. | total={elapsed_ms:.1f}ms")
 
         return context

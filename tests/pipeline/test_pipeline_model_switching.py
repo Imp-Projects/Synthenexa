@@ -65,6 +65,9 @@ class PipelineModelSwitchingTests(unittest.TestCase):
             model="qwen2.5:3b",
             exclude_models="qwen2.5-coder:32b,nemotron-3-super:cloud",
             ollama_base_url="http://ollama.test",
+            no_openai=True,
+            no_gemini=True,
+            interactive=False,
         )
 
         self.assertEqual(

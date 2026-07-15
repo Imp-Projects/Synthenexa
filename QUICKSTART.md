@@ -31,7 +31,7 @@ Prompt → Code Generator → Evaluator → Refiner → Improved Code
 | `synthenexa_pipeline/services/storage.py` | Writes experiment artifacts to the filesystem |
 | `synthenexa_pipeline/core/` | Shared models, config, reward functions, and metrics |
 | `synthenexa_pipeline/pipeline/` | Prompt evolution strategies (greedy, epsilon-greedy) |
-| **Ollama** | Optional — run open-weight models locally (e.g. `cogito:3b`) |
+| **Ollama** | Optional — run open-weight models locally (e.g. `qwen3-coder-next:cloud`) |
 
 ---
 
@@ -168,7 +168,7 @@ ruff format .   # format
 `PYTHONPATH` is not set. Run `export PYTHONPATH="$(pwd)/synthenexa_pipeline"` (or `PYTHONPATH=synthenexa_pipeline pytest -q` for tests).
 
 **Ollama times out**
-Ensure Ollama is running (`ollama serve`) and that `OLLAMA_BASE_URL` in your `.env` matches the port in use (default `22000`). Pull the model first: `ollama pull cogito:3b`.
+Ensure Ollama is running (`ollama serve`) and that `OLLAMA_BASE_URL` in your `.env` matches the port in use (default `22000`). Pull the model first: `ollama pull qwen3-coder-next:cloud`.
 
 **`AuthenticationError` for a cloud provider**
 The API key in `.env` is wrong or expired — verify it on the provider's dashboard and ensure there are no trailing spaces.
@@ -181,5 +181,5 @@ Run `docker info` to confirm Docker is running, then use **Dev Containers: Rebui
 ## Tips
 
 - **Start small** — always run `--generations 1 --mutations 1` first to verify your setup before a full experiment.
-- **Free local runs** — `ollama pull cogito:3b` + `--model cogito:3b` requires no API keys.
+- **Free local runs** — `ollama pull qwen3-coder-next:cloud` + `--model qwen3-coder-next:cloud` requires no API keys.
 - See [`commands.md`](commands.md) for a full provider-specific command cheat-sheet and [`synthenexa_pipeline/RUN_PIPELINE.md`](synthenexa_pipeline/RUN_PIPELINE.md) for deeper pipeline documentation.

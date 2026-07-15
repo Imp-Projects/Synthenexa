@@ -10,6 +10,7 @@ Key design:
 WARNING: exec() of arbitrary LLM-generated code is inherently unsafe.
          In production, wrap this in a Docker container or subprocess with resource limits.
 """
+import time
 import traceback
 from typing import Any, Dict, List
 
@@ -27,6 +28,7 @@ def run_code_on_task(code: str, task: dict) -> Dict[str, Any]:
             "passed":        bool,
             "error_category": "ok" | "syntax_error" | "runtime_error" | "assertion_error",
             "error_message":  str,
+            "elapsed_ms":     float,  # wall-clock execution time in milliseconds
         }
     """
     entry_point = task.get("entry_point", "")
@@ -36,6 +38,7 @@ def run_code_on_task(code: str, task: dict) -> Dict[str, Any]:
     clean_code = _strip_fences(code)
 
     exec_globals: Dict[str, Any] = {}
+    _t_start = time.perf_counter()
 
     # --- Step 1: exec the generated solution ---
     try:
@@ -45,12 +48,14 @@ def run_code_on_task(code: str, task: dict) -> Dict[str, Any]:
             "passed": False,
             "error_category": "syntax_error",
             "error_message": str(exc),
+            "elapsed_ms": (time.perf_counter() - _t_start) * 1000,
         }
     except Exception as exc:
         return {
             "passed": False,
             "error_category": "runtime_error",
             "error_message": str(exc),
+            "elapsed_ms": (time.perf_counter() - _t_start) * 1000,
         }
 
     # --- Step 2: inject the test harness and call check(fn) ---
@@ -68,19 +73,26 @@ def run_code_on_task(code: str, task: dict) -> Dict[str, Any]:
             check_fn()
         # else: no check function — treat as passed (best-effort)
 
-        return {"passed": True, "error_category": "ok", "error_message": ""}
+        return {
+            "passed": True,
+            "error_category": "ok",
+            "error_message": "",
+            "elapsed_ms": (time.perf_counter() - _t_start) * 1000,
+        }
 
     except AssertionError as exc:
         return {
             "passed": False,
             "error_category": "assertion_error",
             "error_message": str(exc),
+            "elapsed_ms": (time.perf_counter() - _t_start) * 1000,
         }
     except Exception as exc:
         return {
             "passed": False,
             "error_category": "runtime_error",
             "error_message": traceback.format_exc(limit=3),
+            "elapsed_ms": (time.perf_counter() - _t_start) * 1000,
         }
 
 
@@ -119,9 +131,12 @@ class EvalService:
         failed        = 0
         syntax_errors = 0
         errors: List[str] = []
+        timings: List[float] = []
 
         for code, task in zip(generated_codes, tasks):
             result = run_code_on_task(code, task)
+            elapsed = result.get("elapsed_ms", 0.0)
+            timings.append(elapsed)
 
             if result["passed"]:
                 passed += 1
@@ -132,8 +147,14 @@ class EvalService:
                 if result["error_message"]:
                     errors.append(
                         f"[{task.get('task_id', '?')}] "
-                        f"{result['error_category']}: {result['error_message']}"
+                        f"{result['error_category']}: {result['error_message']} "
+                        f"({elapsed:.1f}ms)"
                     )
+
+        total_ms = sum(timings)
+        min_ms   = min(timings, default=0.0)
+        max_ms   = max(timings, default=0.0)
+        avg_ms   = total_ms / len(timings) if timings else 0.0
 
         return {
             "passed":        passed,
@@ -141,6 +162,10 @@ class EvalService:
             "total":         len(tasks),
             "syntax_errors": syntax_errors,
             "errors":        errors,
+            "total_time_ms": total_ms,
+            "min_time_ms":   min_ms,
+            "max_time_ms":   max_ms,
+            "avg_time_ms":   avg_ms,
         }
 
 

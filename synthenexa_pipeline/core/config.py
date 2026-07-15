@@ -31,7 +31,7 @@ DEFAULT_SUPPORTED_MODELS = [
     item.strip()
     for item in os.getenv(
         "OLLAMA_MODEL_LIST",
-        "nemotron-3-super:cloud,cogito:3b,qwen2.5:3b,qwen:latest,gemma4:latest",
+        "nemotron-3-super:cloud,qwen3-coder-next:cloud,gpt-oss:120b-cloud,qwen3-coder:480b-cloud",
     ).split(",")
     if item.strip()
 ]

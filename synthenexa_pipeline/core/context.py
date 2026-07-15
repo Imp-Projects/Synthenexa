@@ -30,10 +30,14 @@ class PipelineContext:
     # --- evaluation state ---
     eval_results: Dict[str, EvalResult] = field(default_factory=dict)
     scores: Dict[str, float] = field(default_factory=dict)
+    # ensemble_scores: {prompt_id: {model_name: score}} — populated by EnsembleScoringStage
+    ensemble_scores: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
     # --- RL state ---
     best_prompt: Optional[PromptCandidate] = None
     best_score: float = 0.0
+    best_ensemble_scores: Dict[str, float] = field(default_factory=dict)
+    model_leaderboard: Dict[str, float] = field(default_factory=dict)
     reward_history: Dict[int, float] = field(default_factory=dict)
 
     # ------------------------------------------------------------------ #
@@ -59,4 +63,5 @@ class PipelineContext:
         self.generated_codes = {}
         self.eval_results = {}
         self.scores = {}
+        self.ensemble_scores = {}
         # current_prompt is intentionally kept — it seeds the next mutation round

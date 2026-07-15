@@ -31,13 +31,11 @@ DEFAULT_SUPPORTED_MODELS = [
     # Tier 2 — Gemini
     "gemini:gemini-2.0-flash",
     "gemini:gemini-1.5-pro",
-    # Tier 3 — Nemotron cloud
+    # Tier 3 — Cloud
     "nemotron-3-super:cloud",
-    # Tier 4 — Local Ollama
-    "qwen2.5:3b",
-    "cogito:3b",
-    "qwen:latest",
-    "gemma4:latest",
+    "qwen3-coder-next:cloud",
+    "gpt-oss:120b-cloud",
+    "qwen3-coder:480b-cloud",
 ]
 
 
@@ -108,7 +106,7 @@ class ModelRegistry:
             resource_profile="cloud",
             description="Google Gemini 1.5 Flash — fast and efficient Gemini model.",
         ),
-        # ── Tier 3: Nemotron cloud (primary Ollama baseline) ──────────────
+        # ── Tier 3: Cloud Models (via Ollama) ──────────────
         "nemotron-3-super:cloud": ModelSpec(
             name="nemotron-3-super:cloud",
             provider="ollama",
@@ -117,38 +115,29 @@ class ModelRegistry:
             resource_profile="cloud",
             description="Primary Ollama baseline model for prompt evolution experiments.",
         ),
-        # ── Tier 4: Local Ollama models ───────────────────────────────────
-        "qwen2.5:3b": ModelSpec(
-            name="qwen2.5:3b",
+        "qwen3-coder-next:cloud": ModelSpec(
+            name="qwen3-coder-next:cloud",
             provider="ollama",
-            role="general_purpose",
-            priority=4,
-            resource_profile="3b",
-            description="Primary small general-purpose Ollama model.",
+            role="coder",
+            priority=3,
+            resource_profile="cloud",
+            description="Advanced Qwen3 Coder model for cloud deployment.",
         ),
-        "cogito:3b": ModelSpec(
-            name="cogito:3b",
+        "gpt-oss:120b-cloud": ModelSpec(
+            name="gpt-oss:120b-cloud",
             provider="ollama",
-            role="code_fallback",
-            priority=4,
-            resource_profile="3b",
-            description="Compact Ollama model useful for code-generation tasks.",
+            role="large_capacity",
+            priority=3,
+            resource_profile="cloud",
+            description="High-capacity open-source GPT alternative.",
         ),
-        "qwen:latest": ModelSpec(
-            name="qwen:latest",
+        "qwen3-coder:480b-cloud": ModelSpec(
+            name="qwen3-coder:480b-cloud",
             provider="ollama",
-            role="secondary_baseline",
-            priority=4,
-            resource_profile="4b",
-            description="General-purpose fallback Ollama model.",
-        ),
-        "gemma4:latest": ModelSpec(
-            name="gemma4:latest",
-            provider="ollama",
-            role="higher_capacity",
-            priority=4,
-            resource_profile="8b",
-            description="Optional higher-capacity Ollama comparison model.",
+            role="massive_capacity",
+            priority=3,
+            resource_profile="cloud",
+            description="Massive parameter Qwen3 coder model.",
         ),
     }
 

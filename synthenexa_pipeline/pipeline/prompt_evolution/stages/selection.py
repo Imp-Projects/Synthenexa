@@ -9,7 +9,7 @@ class SelectionStage(Stage):
         self.policy = policy
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        print("Running SelectionStage...")
+        print("\n[SelectionStage] Selecting next generation parent...")
         
         # We need a fallback if no candidates exist, though they should
         if not context.candidate_prompts:
@@ -31,5 +31,8 @@ class SelectionStage(Stage):
         next_prompts = self.policy.select(context.candidate_prompts, context.scores)
         if next_prompts:
             context.current_prompt = next_prompts[0]
+            print(f"  Selected best prompt:")
+            print(f"    {context.current_prompt.id}")
+            print(f"    score={context.scores.get(context.current_prompt.id, 0.0):.4f}\n")
             
         return context

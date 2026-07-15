@@ -41,6 +41,10 @@ class EvaluationStage(Stage):
                 passed=summary["passed"],
                 failed=summary["failed"],
                 total=summary["total"],
+                total_time_ms=summary.get("total_time_ms", 0.0),
+                min_time_ms=summary.get("min_time_ms", 0.0),
+                max_time_ms=summary.get("max_time_ms", 0.0),
+                avg_time_ms=summary.get("avg_time_ms", 0.0),
             )
             context.eval_results[prompt_id] = result
 
@@ -49,7 +53,11 @@ class EvaluationStage(Stage):
             print(
                 f"  ✓ {prompt_id}: "
                 f"{summary['passed']}/{summary['total']} passed ({score_pct:.0f}%) "
-                f"| syntax_errors={summary['syntax_errors']}"
+                f"| syntax_errors={summary['syntax_errors']} "
+                f"| total={summary.get('total_time_ms', 0):.1f}ms "
+                f"avg={summary.get('avg_time_ms', 0):.1f}ms "
+                f"min={summary.get('min_time_ms', 0):.1f}ms "
+                f"max={summary.get('max_time_ms', 0):.1f}ms"
             )
             if summary.get("errors"):
                 for err in summary["errors"][:3]:  # show first 3 errors max

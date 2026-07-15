@@ -39,7 +39,7 @@ You can customize the pipeline run using several flags:
 
 **Example:** Run a quick test with a smaller model:
 ```bash
-python scripts/run_optimization.py --generations 2 --mutations 3 --model cogito:3b
+python scripts/run_optimization.py --generations 2 --mutations 3 --model qwen3-coder-next:cloud
 ```
 
 ## 4. Where to Find Your Results
