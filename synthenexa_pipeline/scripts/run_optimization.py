@@ -40,6 +40,8 @@ from core.config import DATASET_PATH, MODEL_NAME, NUM_MUTATIONS, RLConfig, STORA
 from core.context import PipelineContext
 from core.schema import PromptCandidate
 from pipeline.prompt_evolution.policies.registry import PolicyRegistry
+from pipeline.prompt_evolution.stages.ensemble_execution import EnsembleExecutionStage
+from pipeline.prompt_evolution.stages.ensemble_scoring import EnsembleScoringStage
 from pipeline.prompt_evolution.stages.evaluation import EvaluationStage
 from pipeline.prompt_evolution.stages.execution import ExecutionStage
 from pipeline.prompt_evolution.stages.mutation import MutationStage
@@ -48,6 +50,7 @@ from pipeline.prompt_evolution.stages.selection import SelectionStage
 from pipeline.prompt_evolution.workflow import PromptEvolutionWorkflow
 from services.dataset_service import DatasetService
 from services.eval_service import EvalService
+from services.sandbox_eval_service import SandboxEvalService
 from services.llm.registry import ModelRegistry, _infer_priority, normalize_model_name
 from services.llm_service import LLMService
 from services.storage import StorageService
@@ -177,6 +180,55 @@ def _safe_name(model_name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "_", model_name).strip("._-")
 
 
+def _interactive_model_selection(args) -> list[str]:
+    from utils.ollama_client import get_available_ollama_models
+    print("\n*** Dynamic Ollama Model Selection ***")
+    print("Fetching available local Ollama models...\n")
+    models = get_available_ollama_models()
+    
+    if not models:
+        print("[ERROR] No models found or Ollama is unreachable. Falling back to default.")
+        return [MODEL_NAME]
+    
+    print("Available Ollama models:\n")
+    for idx, m in enumerate(models, 1):
+        print(f"{idx}. {m}")
+        
+    print("\nChoose a model number, or enter multiple numbers (e.g. 1,2) to run multiple models sequentially.")
+    print("You can also enter '0' or 'all' to run all available models.")
+    
+    try:
+        user_input = input("Selection: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n[ERROR] Selection aborted. Falling back to default.")
+        return [MODEL_NAME]
+        
+    if not user_input:
+        print("[ERROR] Empty selection. Falling back to default.")
+        return [MODEL_NAME]
+        
+    if user_input.lower() in ("0", "all"):
+        return models
+        
+    selected_models = []
+    for part in user_input.split(","):
+        part = part.strip()
+        if part.isdigit():
+            idx = int(part)
+            if 1 <= idx <= len(models):
+                selected_models.append(models[idx - 1])
+            else:
+                print(f"[warn] Ignored invalid index: {idx}")
+        else:
+            print(f"[warn] Ignored invalid input: {part}")
+            
+    if not selected_models:
+        print("[ERROR] No valid selection made. Falling back to default.")
+        return [MODEL_NAME]
+        
+    return selected_models
+
+
 def _resolve_model_list(args) -> list[str]:
     """Resolve a priority-sorted list of models from CLI flags.
 
@@ -190,6 +242,9 @@ def _resolve_model_list(args) -> list[str]:
     """
     excluded: set[str] = {item.strip() for item in (getattr(args, "exclude_models", "") or "").split(",") if item.strip()}
     registry = ModelRegistry()
+
+    if getattr(args, "interactive", False):
+        return _interactive_model_selection(args)
 
     if getattr(args, "available_models", False):
         candidates: list[str] = []
@@ -275,12 +330,14 @@ def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: 
     print(f"\n{'=' * 60}")
     print("  Synthenexa — Prompt Evolution Pipeline")
     print(f"{'=' * 60}")
+    eval_backend = getattr(args, "eval_backend", "local")
     print(f"  Run ID:       {run_id}")
     print(f"  Model:        {model_name}")
     print(f"  Generations:  {args.generations}")
     print(f"  Mutations:    {args.mutations}")
     print(f"  Policy:       {args.policy}" + (f" (ε={args.epsilon})" if args.policy == "epsilon_greedy" else ""))
     print(f"  Dataset:      {args.dataset}")
+    print(f"  Eval backend: {eval_backend}")
     print(f"{'=' * 60}\n")
 
     dataset_path = args.dataset
@@ -297,7 +354,16 @@ def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: 
     print(f"Base prompt: {base_prompt.text!r}\n")
 
     llm_service = LLMService(model=model_name, base_url=args.ollama_base_url)
-    eval_service = EvalService()
+
+    # Select evaluation backend based on --eval-backend flag
+    eval_backend = getattr(args, "eval_backend", "local")
+    eval_workers = getattr(args, "eval_workers", 8)
+    if eval_backend == "e2b":
+        eval_service = SandboxEvalService(max_workers=eval_workers, timeout=10)
+        print(f"[EvalBackend] Using E2B remote sandboxes (workers={eval_workers}, timeout=10s)")
+    else:
+        eval_service = EvalService()
+        print(f"[EvalBackend] Using local exec() evaluator")
     # Resolve storage backend: CLI flag → env var → default "file"
     storage_backend = getattr(args, "storage", None) or STORAGE_BACKEND
     storage = StorageService(
@@ -388,6 +454,190 @@ def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: 
     }
 
 
+def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experiment_name: str) -> dict:
+    """Run a cross-model ensemble optimization cycle.
+
+    Each model runs its own Mutation + Execution + Evaluation sub-pipeline
+    independently. EnsembleScoringStage then aggregates the per-model scores
+    into a single combined reward used to select the next-generation prompt.
+    """
+    strategy = getattr(args, "ensemble_strategy", "mean")
+    print(f"\n{'=' * 60}")
+    print("  Synthenexa — Ensemble Prompt Evolution Pipeline")
+    print(f"{'=' * 60}")
+    print(f"  Run ID:       {run_id}")
+    print(f"  Models:       {', '.join(model_names)}")
+    print(f"  Generations:  {args.generations}")
+    print(f"  Mutations:    {args.mutations} per model")
+    print(f"  Policy:       {args.policy}" + (f" (ε={args.epsilon})" if args.policy == "epsilon_greedy" else ""))
+    print(f"  Dataset:      {args.dataset}")
+    print(f"  Strategy:     {strategy}")
+    print(f"{'=' * 60}\n")
+
+    dataset_path = args.dataset
+    if not os.path.isabs(dataset_path):
+        dataset_path = os.path.join(_PIPELINE, dataset_path)
+
+    tasks = DatasetService.load_dataset(dataset_path)
+    if not tasks:
+        raise RuntimeError(f"No tasks loaded from '{dataset_path}'.")
+    print(f"Loaded {len(tasks)} tasks from dataset.\n")
+
+    base_prompt_path = os.path.join(_PIPELINE, "Dataset", "base_prompt.jsonl")
+    base_prompt = _load_base_prompt(base_prompt_path)
+    print(f"Base prompt: {base_prompt.text!r}\n")
+
+    # Build the evaluation backend (shared across all models)
+    eval_backend = getattr(args, "eval_backend", "local")
+    eval_workers = getattr(args, "eval_workers", 8)
+    if eval_backend == "e2b":
+        eval_service = SandboxEvalService(max_workers=eval_workers, timeout=10)
+        print(f"[EvalBackend] Using E2B remote sandboxes (workers={eval_workers}, timeout=10s)")
+    else:
+        eval_service = EvalService()
+        print(f"[EvalBackend] Using local exec() evaluator")
+
+    # Build per-model sub-pipelines
+    model_pipelines = []
+    for model_name in model_names:
+        llm = LLMService(model=model_name, base_url=args.ollama_base_url)
+        model_pipelines.append((
+            model_name,
+            MutationStage(llm_service=llm, num_mutations=args.mutations),
+            ExecutionStage(llm_service=llm),
+            EvaluationStage(eval_service=eval_service),
+        ))
+
+    # Storage + tracker
+    storage_backend = getattr(args, "storage", None) or STORAGE_BACKEND
+    storage = StorageService(
+        base_dir=os.path.join(_PIPELINE, "experiments", "artifacts", experiment_name),
+        backend=storage_backend,
+    )
+    storage.create_experiment_record(
+        run_id=run_id,
+        model_name="ensemble:" + ",".join(model_names),
+        experiment_name=experiment_name,
+        config_dict={
+            "generations": args.generations,
+            "mutations": args.mutations,
+            "policy": args.policy,
+            "ensemble_models": model_names,
+            "ensemble_strategy": strategy,
+        },
+    )
+    tracker = RLTracker()
+
+    rl_config = RLConfig(policy_type=args.policy, epsilon=args.epsilon)
+    policy = PolicyRegistry.get_policy(rl_config)
+
+    # Ensemble DAG: EnsembleExecution → EnsembleScoring → Selection
+    stages = [
+        EnsembleExecutionStage(model_pipelines=model_pipelines),
+        EnsembleScoringStage(strategy=strategy),
+        SelectionStage(policy=policy),
+    ]
+
+    context = PipelineContext(
+        model_name="ensemble",
+        run_id=run_id,
+        base_prompt=base_prompt,
+        tasks=tasks,
+    )
+
+    workflow = PromptEvolutionWorkflow(
+        context=context,
+        stages=stages,
+        policy=policy,
+        storage=storage,
+        tracker=tracker,
+    )
+
+    final_context = workflow.run(generations=args.generations)
+
+    storage.finalize_experiment(
+        best_prompt=final_context.best_prompt,
+        best_score=final_context.best_score,
+    )
+
+    print("\n" + "=" * 60)
+    print("  Optimization Complete!")
+    print("=" * 60)
+    
+    print("\n[SelectionStage] Final winner selected.")
+    if final_context.best_prompt:
+        print(f"\nBest Universal Prompt (score={final_context.best_score:.4f})")
+        print("\nOrigin:")
+        print(f"  Model: {final_context.best_prompt.origin_model or 'base'}")
+        print(f"  Generation: {final_context.best_prompt.generation}")
+        print(f"  Mutation: {final_context.best_prompt.mutation_idx}")
+        
+        print("\nEvaluated Across:")
+        for m, s in sorted(final_context.best_ensemble_scores.items()):
+            print(f"  ✓ {m:<22} {s:.4f}")
+            
+        print("\n" + "-" * 60)
+        print(final_context.best_prompt.text)
+        print("-" * 60)
+        
+        print("\n============================================================")
+        print(" Model Performance Summary")
+        print("============================================================")
+        print(f"{'Model':<30} Best Score")
+        print("-" * 60)
+        for m, s in sorted(final_context.model_leaderboard.items(), key=lambda x: x[1], reverse=True):
+            print(f"{m:<30} {s:.4f}")
+        print("============================================================\n")
+
+        print("Best Prompt Contribution:\n")
+        print("Prompt generated by:")
+        print(f"{final_context.best_prompt.origin_model or 'base'}\n")
+        print("Performance:\n")
+        
+        for m, s in sorted(final_context.best_ensemble_scores.items()):
+            print(f"{m}:")
+            filled = int(s * 10)
+            bar = "█" * filled + "░" * (10 - filled)
+            print(f"{bar} {s*100:.0f}%\n")
+            
+        print("Mean Reward:")
+        print(f"{final_context.best_score:.4f}\n")
+
+    else:
+        print("  No best prompt found (all generations may have failed).")
+
+    _print_reward_table(final_context.reward_history)
+
+    should_export = getattr(args, "export_artifacts", False) or storage_backend == "file"
+    best_path = os.path.join(_PIPELINE, "experiments", "artifacts", experiment_name, "best_prompt.json")
+    if final_context.best_prompt and should_export:
+        os.makedirs(os.path.dirname(best_path), exist_ok=True)
+        with open(best_path, "w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "run_id": run_id,
+                    "ensemble_models": model_names,
+                    "ensemble_strategy": strategy,
+                    "prompt_id": final_context.best_prompt.id,
+                    "text": final_context.best_prompt.text,
+                    "score": final_context.best_score,
+                    "reward_history": final_context.reward_history,
+                },
+                handle,
+                indent=2,
+            )
+        print(f"\n  Best prompt saved → {best_path}")
+
+    return {
+        "model": "ensemble:" + ",".join(model_names),
+        "experiment": experiment_name,
+        "best_score": final_context.best_score,
+        "best_prompt": final_context.best_prompt.text if final_context.best_prompt else "",
+        "best_prompt_id": final_context.best_prompt.id if final_context.best_prompt else "",
+        "reward_history": final_context.reward_history,
+    }
+
+
 # ------------------------------------------------------------------ #
 #  Main                                                               #
 # ------------------------------------------------------------------ #
@@ -416,6 +666,11 @@ def main():
     )
     parser.add_argument(
         "--models", type=str, default="", help="Comma-separated list of models to evaluate sequentially."
+    )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Interactively select one or more Ollama models before running.",
     )
     parser.add_argument(
         "--available-models",
@@ -468,6 +723,23 @@ def main():
         ),
     )
     parser.add_argument(
+        "--eval-backend",
+        type=str,
+        default="local",
+        choices=["local", "e2b"],
+        help=(
+            "Evaluation backend to use: 'local' (default) runs code via exec() in-process; "
+            "'e2b' runs code in secure remote E2B microVM sandboxes with enforced timeouts. "
+            "Requires E2B_API_KEY to be set when using 'e2b'."
+        ),
+    )
+    parser.add_argument(
+        "--eval-workers",
+        type=int,
+        default=8,
+        help="Number of parallel sandbox workers when using --eval-backend e2b (default: 8).",
+    )
+    parser.add_argument(
         "--init-db",
         action="store_true",
         help="Initialize database schema by running Alembic migrations."
@@ -476,6 +748,28 @@ def main():
         "--export-artifacts",
         action="store_true",
         help="Export JSON artifact reports (e.g., best_prompt.json, summary.json). Default is False unless using 'file' storage."
+    )
+    parser.add_argument(
+        "--ensemble",
+        action="store_true",
+        help=(
+            "Run cross-model ensemble optimization. Each selected model independently "
+            "mutates and evaluates prompts; scores are combined to select the prompt that "
+            "generalizes best across all models. Requires --models or --interactive with "
+            "2+ models."
+        ),
+    )
+    parser.add_argument(
+        "--ensemble-strategy",
+        type=str,
+        default="mean",
+        choices=["mean", "min", "max"],
+        help=(
+            "How to aggregate per-model scores in ensemble mode: "
+            "'mean' (default) rewards consistent cross-model performance; "
+            "'min' rewards prompts that never fail on any model; "
+            "'max' rewards prompts that excel on at least one model."
+        ),
     )
     args = parser.parse_args()
 
@@ -493,6 +787,19 @@ def main():
     if not model_names:
         model_names = [args.model]
 
+    # ── Ensemble mode: cross-model joint optimization ──────────────────
+    if getattr(args, "ensemble", False):
+        if len(model_names) < 2:
+            print(
+                "[ERROR] --ensemble requires at least 2 models. "
+                "Use --models 'a,b' or --interactive to select multiple models."
+            )
+            sys.exit(1)
+        experiment_name = args.experiment or f"ensemble_{run_id}"
+        result = _run_ensemble_experiment(args, model_names, run_id, experiment_name)
+        return
+
+    # ── Standard per-model independent optimization ────────────────────
     comparison_results = []
     for index, model_name in enumerate(model_names):
         experiment_name = args.experiment or f"run_{run_id}"
