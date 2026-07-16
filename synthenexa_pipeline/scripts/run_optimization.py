@@ -50,7 +50,6 @@ from pipeline.prompt_evolution.stages.selection import SelectionStage
 from pipeline.prompt_evolution.workflow import PromptEvolutionWorkflow
 from services.dataset_service import DatasetService
 from services.eval_service import EvalService
-from services.sandbox_eval_service import SandboxEvalService
 from services.llm.registry import ModelRegistry, _infer_priority, normalize_model_name
 from services.llm_service import LLMService
 from services.storage import StorageService
@@ -355,15 +354,8 @@ def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: 
 
     llm_service = LLMService(model=model_name, base_url=args.ollama_base_url)
 
-    # Select evaluation backend based on --eval-backend flag
-    eval_backend = getattr(args, "eval_backend", "local")
-    eval_workers = getattr(args, "eval_workers", 8)
-    if eval_backend == "e2b":
-        eval_service = SandboxEvalService(max_workers=eval_workers, timeout=10)
-        print(f"[EvalBackend] Using E2B remote sandboxes (workers={eval_workers}, timeout=10s)")
-    else:
-        eval_service = EvalService()
-        print(f"[EvalBackend] Using local exec() evaluator")
+    eval_service = EvalService()
+    print(f"[EvalBackend] Using local exec() evaluator")
     # Resolve storage backend: CLI flag → env var → default "file"
     storage_backend = getattr(args, "storage", None) or STORAGE_BACKEND
     storage = StorageService(
@@ -488,14 +480,8 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
     print(f"Base prompt: {base_prompt.text!r}\n")
 
     # Build the evaluation backend (shared across all models)
-    eval_backend = getattr(args, "eval_backend", "local")
-    eval_workers = getattr(args, "eval_workers", 8)
-    if eval_backend == "e2b":
-        eval_service = SandboxEvalService(max_workers=eval_workers, timeout=10)
-        print(f"[EvalBackend] Using E2B remote sandboxes (workers={eval_workers}, timeout=10s)")
-    else:
-        eval_service = EvalService()
-        print(f"[EvalBackend] Using local exec() evaluator")
+    eval_service = EvalService()
+    print(f"[EvalBackend] Using local exec() evaluator")
 
     # Build per-model sub-pipelines
     model_pipelines = []
@@ -722,23 +708,7 @@ def main():
             "Overrides the STORAGE_BACKEND env var."
         ),
     )
-    parser.add_argument(
-        "--eval-backend",
-        type=str,
-        default="local",
-        choices=["local", "e2b"],
-        help=(
-            "Evaluation backend to use: 'local' (default) runs code via exec() in-process; "
-            "'e2b' runs code in secure remote E2B microVM sandboxes with enforced timeouts. "
-            "Requires E2B_API_KEY to be set when using 'e2b'."
-        ),
-    )
-    parser.add_argument(
-        "--eval-workers",
-        type=int,
-        default=8,
-        help="Number of parallel sandbox workers when using --eval-backend e2b (default: 8).",
-    )
+
     parser.add_argument(
         "--init-db",
         action="store_true",
