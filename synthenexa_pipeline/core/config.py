@@ -20,7 +20,7 @@ load_dotenv(os.path.join(ROOT_DIR, ".env"), override=False)
 #  Module-level constants (quick access)                              #
 # ------------------------------------------------------------------ #
 
-MODEL_NAME = os.getenv("OLLAMA_DEFAULT_MODEL") or os.getenv("OLLAMA_MODEL") or "nemotron-3-super:cloud"
+MODEL_NAME = os.getenv("OLLAMA_DEFAULT_MODEL") or os.getenv("OLLAMA_MODEL") or "qwen3-coder-next:cloud"
 TEMPERATURE = float(os.getenv("OLLAMA_TEMPERATURE", "0.7"))
 
 NUM_MUTATIONS = 5
