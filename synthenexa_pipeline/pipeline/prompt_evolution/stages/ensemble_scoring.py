@@ -48,12 +48,8 @@ class EnsembleScoringStage(Stage):
         )
         context.scores = {}
 
-        # Build a lookup for candidate lineage info (using any tagged variant)
-        candidate_lineage = {}
-        for c in context.candidate_prompts:
-            base_id = c.parent_id + f"_gen{c.generation}_m{c.mutation_idx}"
-            if base_id not in candidate_lineage:
-                candidate_lineage[base_id] = c
+        # Direct lookup by globally-unique UID (set by EnsembleExecutionStage Phase 1)
+        candidate_by_id = {c.id: c for c in context.candidate_prompts}
 
         for prompt_id, model_scores in context.ensemble_scores.items():
             if not model_scores:
@@ -76,13 +72,12 @@ class EnsembleScoringStage(Stage):
                     context.model_leaderboard[m] = s
 
             # Human-readable breakdown
-            c = candidate_lineage.get(prompt_id)
+            c = candidate_by_id.get(prompt_id)
             if c:
-                print("Candidate:")
-                print(f"  ID: m{c.mutation_idx}")
+                print(f"Candidate: {prompt_id}")
                 print(f"  Origin Model: {c.origin_model}")
-                print(f"  Generation: {c.generation}")
-                print(f"  Parent: {c.parent_id}\n")
+                print(f"  Generation:   {c.generation}")
+                print(f"  Mutation:     {c.mutation_idx}\n")
             else:
                 print(f"Candidate: {prompt_id}\n")
 
