@@ -1,29 +1,32 @@
 """
-services/database.py — Database connection management for PostgreSQL.
+services/database.py — Database connection management for SQLite.
 
 Provides:
-  - DatabaseManager class for connection pooling
+  - DatabaseManager class using SQLAlchemy + SQLite
   - Session management with context manager
-  - Connection health checks
+  - Auto-creates the database file and schema on first use
 """
+import os
 from contextlib import contextmanager
 from typing import Optional
 
 from sqlalchemy import create_engine, Engine, text
 from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.pool import QueuePool
 
 from core.config import DatabaseConfig
 
 
 class DatabaseManager:
     """
-    Manages PostgreSQL database connections with connection pooling.
-    
+    Manages an SQLite database connection via SQLAlchemy.
+
+    The database file is created automatically when the manager is first
+    instantiated.  No server, password, or network configuration is required.
+
     Usage:
-        config = DatabaseConfig()
+        config = DatabaseConfig()          # defaults to experiments/synthenexa.db
         db = DatabaseManager(config)
-        
+
         with db.get_session() as session:
             # Use session for database operations
             pass
@@ -31,10 +34,10 @@ class DatabaseManager:
 
     def __init__(self, config: DatabaseConfig):
         """
-        Initialize database manager with connection pool.
-        
+        Initialise the database manager and create the schema if needed.
+
         Args:
-            config: DatabaseConfig instance with connection parameters
+            config: DatabaseConfig instance holding the db_path.
         """
         self.config = config
         self._engine: Optional[Engine] = None
@@ -42,26 +45,40 @@ class DatabaseManager:
         self._initialize_engine()
 
     def _initialize_engine(self) -> None:
-        """Create SQLAlchemy engine with connection pooling."""
-        connection_string = (
-            f"postgresql://{self.config.user}:{self.config.password}"
-            f"@{self.config.host}:{self.config.port}/{self.config.database}"
-        )
-        
+        """Create a SQLAlchemy engine pointed at the configured SQLite file."""
+        # Ensure the parent directory exists (e.g. experiments/)
+        db_dir = os.path.dirname(self.config.db_path)
+        if db_dir:
+            os.makedirs(db_dir, exist_ok=True)
+
+        connection_string = f"sqlite:///{self.config.db_path}"
+
         self._engine = create_engine(
             connection_string,
-            poolclass=QueuePool,
-            pool_size=self.config.pool_size,
-            max_overflow=self.config.max_overflow,
-            pool_pre_ping=True,  # Verify connections before using
+            # Allow the same connection to be used across threads (safe for our
+            # single-writer / multi-reader evaluation pipeline)
+            connect_args={"check_same_thread": False},
             echo=False,  # Set to True for SQL query logging
         )
-        
+
         self._SessionLocal = sessionmaker(
             bind=self._engine,
             autocommit=False,
             autoflush=False,
         )
+
+    def create_all_tables(self) -> None:
+        """
+        Create all ORM-defined tables that do not yet exist.
+
+        This is idempotent — calling it multiple times is safe.
+        Replaces the old Alembic migration step for local development.
+        """
+        from core.db_models import (  # noqa: F401 — import to register models
+            Evaluation, Experiment, Prompt, RunLog, Snapshot,
+        )
+        from core.config import Base
+        Base.metadata.create_all(self._engine)
 
     @property
     def engine(self) -> Engine:
@@ -74,19 +91,19 @@ class DatabaseManager:
     def get_session(self) -> Session:
         """
         Context manager for database sessions.
-        
+
         Automatically handles:
           - Session creation
           - Transaction commit on success
           - Transaction rollback on error
           - Session cleanup
-        
+
         Yields:
             Session: SQLAlchemy session object
         """
         if self._SessionLocal is None:
             raise RuntimeError("Database session factory not initialized")
-        
+
         session = self._SessionLocal()
         try:
             yield session
@@ -99,10 +116,10 @@ class DatabaseManager:
 
     def check_connection(self) -> bool:
         """
-        Check if database connection is healthy.
-        
+        Check if the database connection is healthy.
+
         Returns:
-            bool: True if connection is healthy, False otherwise
+            bool: True if connection is healthy, False otherwise.
         """
         try:
             with self.get_session() as session:
@@ -119,28 +136,27 @@ class DatabaseManager:
             self._SessionLocal = None
 
 
-# Global database manager instance (initialized on first use)
+# Global database manager instance (initialised on first use)
 _global_db_manager: Optional[DatabaseManager] = None
 
 
 def get_database_manager(config: Optional[DatabaseConfig] = None) -> DatabaseManager:
     """
     Get or create the global database manager instance.
-    
+
     Args:
-        config: Optional DatabaseConfig. If not provided, uses default from environment.
-    
+        config: Optional DatabaseConfig.  If not provided, uses default from environment.
+
     Returns:
-        DatabaseManager: Global database manager instance
+        DatabaseManager: Global database manager instance.
     """
     global _global_db_manager
-    
+
     if _global_db_manager is None:
         if config is None:
-            from core.config import DatabaseConfig as DefaultConfig
-            config = DefaultConfig()
+            config = DatabaseConfig()
         _global_db_manager = DatabaseManager(config)
-    
+
     return _global_db_manager
 
 
