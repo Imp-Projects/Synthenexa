@@ -28,6 +28,10 @@ synthenexa_pipeline/Dataset/*
 
 ollama.log
 
-# Experiments artifacts
-synthenexa_pipeline/experiments/artifacts/
+# Experiments artifacts and local databases
+synthenexa_pipeline/experiments/
+
+# Analysis outputs
+synthenexa_pipeline/Analysis/output/
+
 docs/
