@@ -1,5 +1,5 @@
 """
-core/db_models.py — SQLAlchemy ORM models for PostgreSQL database.
+core/db_models.py — SQLAlchemy ORM models (SQLite-compatible).
 
 Defines database schema for:
   - experiments: Experiment metadata and run information
@@ -17,11 +17,11 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.config import Base
@@ -51,7 +51,7 @@ class Experiment(Base):
     base_prompt_id: Mapped[Optional[str]] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
-    config: Mapped[Optional[dict]] = mapped_column(JSONB)
+    config: Mapped[Optional[dict]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(50), default="running")
 
     # Relationships
@@ -96,7 +96,7 @@ class Prompt(Base):
     __table_args__ = (
         UniqueConstraint("prompt_id", "experiment_id", "generation", name="uq_prompt_experiment_generation"),
         Index("idx_prompts_experiment_generation", "experiment_id", "generation"),
-        Index("idx_prompts_is_best", "is_best", postgresql_where=is_best == True),
+        Index("idx_prompts_is_best", "is_best"),
     )
 
 
@@ -126,7 +126,7 @@ class Evaluation(Base):
     failed: Mapped[int] = mapped_column(Integer, nullable=False)
     total: Mapped[int] = mapped_column(Integer, nullable=False)
     syntax_errors: Mapped[int] = mapped_column(Integer, default=0)
-    errors: Mapped[Optional[list]] = mapped_column(JSONB)
+    errors: Mapped[Optional[list]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
 
     # Relationships
@@ -161,8 +161,8 @@ class Snapshot(Base):
     best_score: Mapped[Optional[float]] = mapped_column(Float)
     best_prompt_id: Mapped[Optional[str]] = mapped_column(String(50))
     best_prompt_text: Mapped[Optional[str]] = mapped_column(Text)
-    scores: Mapped[Optional[dict]] = mapped_column(JSONB)
-    reward_history: Mapped[Optional[dict]] = mapped_column(JSONB)
+    scores: Mapped[Optional[dict]] = mapped_column(JSON)
+    reward_history: Mapped[Optional[dict]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
 
     # Relationships
@@ -188,7 +188,7 @@ class RunLog(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     experiment_id: Mapped[int] = mapped_column(ForeignKey("experiments.id"), nullable=False)
-    log_entry: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    log_entry: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
 
     # Relationships
