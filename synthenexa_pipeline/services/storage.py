@@ -1,21 +1,17 @@
 """
-services/storage.py — Persist pipeline artifacts to disk or PostgreSQL.
+services/storage.py — Persist pipeline artifacts to disk or SQLite.
 
 Architecture (dual-backend router):
-    StorageService(backend="file" | "postgres")
-        ├── FileStorageBackend   — original JSON/JSONL logic (Phase 1, unchanged)
-        └── PostgresStorageBackend — SQLAlchemy-based backend   (Phase 2, new)
+    StorageService(backend="file" | "local" | "sqlite")
+        ├── FileStorageBackend   — JSON/JSONL files (default)
+        └── SQLiteStorageBackend — SQLAlchemy + SQLite
 
 The backend is selected at construction time via the ``backend=`` kwarg
 (which defaults to the ``STORAGE_BACKEND`` env var, which itself defaults to
-"file"). The public API is identical for both backends, so the rest of the
-pipeline (workflow.py, etc.) requires no changes.
+"file"). The public API is identical for both backends.
 
-File naming conventions (file backend):
-  - prompts_gen_{N}.jsonl         — candidate prompts for generation N
-  - evaluations_gen_{N}.jsonl     — eval results for generation N
-  - snapshot_gen_{N}.json         — full generation state snapshot
-  - run_logs.jsonl                — append-only run log
+``"local"`` is accepted as an alias for ``"file"`` so that users switching
+away from the old ``"postgres"`` setting have a familiar fallback keyword.
 """
 import json
 import os
@@ -103,18 +99,20 @@ class FileStorageBackend:
 
 
 # ======================================================================= #
-#  Phase 2 — PostgreSQL backend (new)                                     #
+#  SQLite backend                                                          #
 # ======================================================================= #
 
 
-class PostgresStorageBackend:
-    """Stores pipeline artifacts as rows in a PostgreSQL database."""
+class SQLiteStorageBackend:
+    """Stores pipeline artifacts as rows in an SQLite database."""
 
     def __init__(self) -> None:
-        # Import lazily so the file backend never requires psycopg2/SQLAlchemy
+        # Import lazily so the file backend never requires SQLAlchemy
         from services.database import get_database_manager
         from core.config import DatabaseConfig
         self._db = get_database_manager(DatabaseConfig())
+        # Auto-create tables on first use (replaces Alembic for local SQLite)
+        self._db.create_all_tables()
         self._experiment_id: Optional[int] = None
 
     # ---------------------------------------------------------------- #
@@ -136,7 +134,7 @@ class PostgresStorageBackend:
             session.add(experiment)
             session.flush()  # populate experiment.id before commit
             self._experiment_id = experiment.id
-        print(f"[storage/postgres] Experiment record created (id={self._experiment_id}, run_id={run_id})")
+        print(f"[storage/sqlite] Experiment record created (id={self._experiment_id}, run_id={run_id})")
 
     def finalize_experiment(self, best_prompt: Optional[Any], best_score: float) -> None:
         """Mark the experiment as completed and flag the best prompt."""
@@ -156,7 +154,7 @@ class PostgresStorageBackend:
                 )
                 if best_row:
                     best_row.is_best = True
-        print(f"[storage/postgres] Experiment {self._experiment_id} finalised (best_score={best_score:.4f})")
+        print(f"[storage/sqlite] Experiment {self._experiment_id} finalised (best_score={best_score:.4f})")
 
     # ---------------------------------------------------------------- #
     #  Domain-specific save methods (public API)                        #
@@ -232,19 +230,24 @@ class StorageService:
     Backend-agnostic storage router.
 
     Delegates every save_* call to either ``FileStorageBackend`` or
-    ``PostgresStorageBackend`` depending on the ``backend`` argument (or
+    ``SQLiteStorageBackend`` depending on the ``backend`` argument (or
     the ``STORAGE_BACKEND`` env var when ``backend`` is not given).
+
+    Accepted backend values:
+      - ``"file"``   — JSON/JSONL artifacts on disk (default)
+      - ``"local"``  — alias for ``"file"``; useful as an explicit fallback
+      - ``"sqlite"`` — SQLite database at the configured db_path
 
     The public API is identical regardless of backend, so workflow.py and
     all other callers require no changes.
 
     Usage
     -----
-    # File backend (default):
+    # File/local backend (default):
         storage = StorageService(base_dir="experiments/artifacts/run_123")
 
-    # Postgres backend:
-        storage = StorageService(backend="postgres")
+    # SQLite backend:
+        storage = StorageService(backend="sqlite")
         storage.create_experiment_record(run_id, model_name, exp_name, cfg)
         # … run pipeline …
         storage.finalize_experiment(best_prompt, best_score)
@@ -259,12 +262,13 @@ class StorageService:
         backend: Optional[str] = None,
     ) -> None:
         resolved = (backend or STORAGE_BACKEND).lower()
-        if resolved == "postgres":
-            self._backend: Any = PostgresStorageBackend()
-            print("[storage] Using PostgreSQL backend.")
+        if resolved == "sqlite":
+            self._backend: Any = SQLiteStorageBackend()
+            print("[storage] Using SQLite backend.")
         else:
+            # "file" and "local" both use the file backend
             self._backend = FileStorageBackend(base_dir=base_dir)
-            if resolved != "file":
+            if resolved not in ("file", "local"):
                 print(f"[storage] Unknown backend '{resolved}', falling back to file.")
 
     # ---------------------------------------------------------------- #
@@ -278,7 +282,7 @@ class StorageService:
         experiment_name: str,
         config_dict: Dict[str, Any],
     ) -> None:
-        """Create a DB experiment record (postgres) or do nothing (file)."""
+        """Create a DB experiment record (sqlite) or do nothing (file/local)."""
         self._backend.create_experiment_record(run_id, model_name, experiment_name, config_dict)
 
     def finalize_experiment(
@@ -286,7 +290,7 @@ class StorageService:
         best_prompt: Optional[Any],
         best_score: float,
     ) -> None:
-        """Finalise the experiment record (postgres) or do nothing (file)."""
+        """Finalise the experiment record (sqlite) or do nothing (file/local)."""
         self._backend.finalize_experiment(best_prompt, best_score)
 
     # ---------------------------------------------------------------- #
@@ -314,12 +318,12 @@ class StorageService:
     # ---------------------------------------------------------------- #
 
     def save_jsonl(self, filename: str, data: List[Dict[str, Any]]) -> None:
-        """Low-level JSONL append (file backend only; silently skipped on postgres)."""
+        """Low-level JSONL append (file/local backend only; silently skipped on sqlite)."""
         if isinstance(self._backend, FileStorageBackend):
             self._backend.save_jsonl(filename, data)
 
     def load_jsonl(self, filename: str) -> List[Dict[str, Any]]:
-        """Low-level JSONL read (file backend only; returns [] on postgres)."""
+        """Low-level JSONL read (file/local backend only; returns [] on sqlite)."""
         if isinstance(self._backend, FileStorageBackend):
             return self._backend.load_jsonl(filename)
         return []
