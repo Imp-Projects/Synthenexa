@@ -37,14 +37,15 @@ DEFAULT_SUPPORTED_MODELS = [
 ]
 
 
-# PostgreSQL configuration
-POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
-POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
-POSTGRES_DB = os.getenv("POSTGRES_DB", "synthenexa")
-POSTGRES_USER = os.getenv("POSTGRES_USER", "synthenexa")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "synthenexa")
+# SQLite configuration
+# The .db file will live inside the experiments/ directory, which the pipeline
+# creates automatically. Override by setting SQLITE_DB_PATH in your .env.
+SQLITE_DB_PATH = os.getenv(
+    "SQLITE_DB_PATH",
+    os.path.join(ROOT_DIR, "synthenexa_pipeline", "experiments", "synthenexa.db"),
+)
 
-# Storage backend selection: "file" (default) or "postgres"
+# Storage backend selection: "file" (default), "local" (alias for file), or "sqlite"
 STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "file")
 
 
@@ -97,14 +98,8 @@ class RLConfig(BaseModel):
 
 
 class DatabaseConfig(BaseModel):
-    """Configuration for PostgreSQL database connection."""
-    host: str = POSTGRES_HOST
-    port: int = int(POSTGRES_PORT)
-    database: str = POSTGRES_DB
-    user: str = POSTGRES_USER
-    password: str = POSTGRES_PASSWORD
-    pool_size: int = 5
-    max_overflow: int = 10
+    """Configuration for the SQLite database file."""
+    db_path: str = SQLITE_DB_PATH
 
 
 class ExperimentConfig(BaseModel):
