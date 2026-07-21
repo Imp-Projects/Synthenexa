@@ -34,8 +34,6 @@ if _PIPELINE not in sys.path:
 # ─────────────────────────────────────────────────────────────────────────────
 
 import requests
-from alembic.config import Config
-from alembic import command
 from core.config import DATASET_PATH, MODEL_NAME, NUM_MUTATIONS, RLConfig, STORAGE_BACKEND
 from core.context import PipelineContext
 from core.schema import PromptCandidate
@@ -60,26 +58,16 @@ from services.tracker import RLTracker
 # ------------------------------------------------------------------ #
 
 
-def init_database():
-    """Run Alembic migrations to initialize database schema."""
-    migrations_dir = os.path.join(_PIPELINE, "migrations")
-    alembic_ini = os.path.join(migrations_dir, "alembic.ini")
-    
-    if not os.path.exists(alembic_ini):
-        print(f"[ERROR] Alembic configuration not found at {alembic_ini}")
-        return False
-    
+def init_database() -> bool:
+    """Create all SQLite tables defined in db_models.py (idempotent)."""
     try:
-        alembic_cfg = Config(alembic_ini)
-        # Set the script location relative to the migrations directory
-        alembic_cfg.set_main_option("script_location", migrations_dir)
-        
-        print("[INFO] Running database migrations...")
-        command.upgrade(alembic_cfg, "head")
-        print("[INFO] Database migrations completed successfully.")
+        from services.database import get_database_manager
+        db = get_database_manager()
+        db.create_all_tables()
+        print("[INFO] SQLite schema initialised successfully.")
         return True
     except Exception as e:
-        print(f"[ERROR] Failed to run database migrations: {e}")
+        print(f"[ERROR] Failed to initialise database: {e}")
         return False
 
 
@@ -701,10 +689,12 @@ def main():
         "--storage",
         type=str,
         default=None,
-        choices=["file", "postgres"],
+        choices=["file", "local", "sqlite"],
         help=(
-            "Storage backend to use: 'file' (default) writes JSON/JSONL artifacts; "
-            "'postgres' writes to the configured PostgreSQL database. "
+            "Storage backend to use: "
+            "'file' / 'local' (default) writes JSON/JSONL artifacts to disk; "
+            "'sqlite' writes structured data to experiments/synthenexa.db for "
+            "easy querying with Pandas and SQL. "
             "Overrides the STORAGE_BACKEND env var."
         ),
     )
@@ -712,7 +702,7 @@ def main():
     parser.add_argument(
         "--init-db",
         action="store_true",
-        help="Initialize database schema by running Alembic migrations."
+        help="Create the SQLite schema (experiments/synthenexa.db). Safe to run multiple times."
     )
     parser.add_argument(
         "--export-artifacts",
