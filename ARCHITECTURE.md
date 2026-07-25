@@ -13,13 +13,14 @@
 
 ## 1. Project Overview
 
-Synthenexa is a **prompt-evolution pipeline** with RL-inspired selection. It treats system prompt optimization as a search problem:
+Synthenexa is a **multi-model prompt-evolution pipeline** with RL-inspired selection. It discovers universal, model-agnostic prompts by treating optimization as a cross-architecture search problem:
 
-- A **seed prompt** is mutated by an LLM into a population of candidates.
-- Each candidate is used to generate Python code against a benchmark dataset.
+- A **seed prompt** is mutated by an ensemble of LLMs into a diverse pool of candidates.
+- Every candidate is cross-tested on every model in the ensemble to generate Python code against a benchmark dataset.
 - The generated code is executed and scored (pass@1).
-- A **policy** (greedy or epsilon-greedy) selects the best-scoring prompt as the seed for the next generation.
-- The loop repeats for *N* generations, converging on progressively better prompts.
+- Scores are aggregated across models (e.g., mean, min, max) to calculate a unified reward.
+- A **policy** (greedy or epsilon-greedy) selects the prompt with the best universal score as the seed for the next generation.
+- The loop repeats for *N* generations, converging on prompts that perform consistently well across different LLMs.
 
 This is sometimes described as a DAG (Directed Acyclic Graph) pipeline **within each generation** — data flows strictly from mutation → execution → evaluation → scoring → selection. Across generations the best prompt is fed back as the next seed, making the outer loop cyclic/iterative, which is the RL-style aspect.
 
@@ -31,7 +32,7 @@ This is sometimes described as a DAG (Directed Acyclic Graph) pipeline **within 
 Synthenexa/
 ├── .devcontainer/                  # Dev Container definition
 │   ├── devcontainer.json           # VS Code Dev Container config
-│   ├── docker-compose.yml          # App + DB services
+│   ├── docker-compose.yml          # App service
 │   └── Dockerfile                  # Python 3.11 base image
 │
 ├── synthenexa_pipeline/            # All application code lives here
@@ -51,7 +52,9 @@ Synthenexa/
 │   │       │   ├── execution.py    # LLM generates code from each candidate
 │   │       │   ├── evaluation.py   # EvalPlus runs code against test suite
 │   │       │   ├── scoring.py      # Converts eval results to scalar rewards
-│   │       │   └── selection.py    # Policy picks the next seed prompt
+│   │       │   ├── selection.py    # Policy picks the next seed prompt
+│   │       │   ├── ensemble_execution.py  # Cross-model execution & evaluation
+│   │       │   └── ensemble_scoring.py    # Aggregates per-model scores
 │   │       └── policies/           # Pluggable selection strategies
 │   │           ├── greedy.py       # Always pick highest-scored candidate
 │   │           ├── epsilon_greedy.py # Occasionally explore a random candidate
@@ -70,15 +73,19 @@ Synthenexa/
 │   │   ├── llm_service.py          # High-level LLM façade used by pipeline stages
 │   │   ├── eval_service.py         # EvalPlus wrapper (code execution + scoring)
 │   │   ├── dataset_service.py      # Loads .jsonl benchmark datasets
-│   │   ├── storage.py              # Persists artifacts (snapshots, prompts, evals)
+│   │   ├── database.py             # SQLAlchemy engine + session for SQLite
+│   │   ├── storage.py              # Persists artifacts (file or SQLite backend)
 │   │   └── tracker.py              # Lightweight per-generation reward logger
+│   │
+│   ├── api.py                      # FastAPI results viewer (serves on :8000)
+│   ├── templates/
+│   │   └── index.html              # Web UI for browsing experiment outputs
 │   │
 │   ├── scripts/
 │   │   └── run_optimization.py     # CLI entry point — parses args, wires everything up
 │   │
 │   ├── Dataset/                    # Benchmark datasets (.jsonl)
-│   ├── experiments/artifacts/      # Per-run output (gitignored)
-│   └── migrations/                 # Alembic DB migrations (PostgreSQL — WIP)
+│   └── experiments/artifacts/      # Per-run output (gitignored)
 │
 ├── tests/                          # pytest test suite
 ├── .env                            # Local secrets (gitignored)
@@ -129,23 +136,42 @@ The routing key is encoded in the model name prefix (`openai:`, `gemini:`, or ba
 
 `ModelRegistry` maintains a tiered catalogue of all supported models (Tier 1 OpenAI → Tier 4 local Ollama), enabling `--available-models` to auto-discover configured providers from `.env` at runtime.
 
-### 3.4 DAG stages within each generation
+### 3.4 The Prompt Evolution Pipeline (DAG Stages)
 
-Each generation runs five stages in sequence. Each stage is a class that implements a `run(context) → context` interface:
+The pipeline executes a strict Directed Acyclic Graph (DAG) of stages during each generation. Because the primary goal is discovering **universal, model-agnostic prompts**, the default architectural flow is the multi-model ensemble mode.
 
-| Stage | Responsibility |
-|---|---|
-| `MutationStage` | Calls the LLM to produce *N* mutated prompt candidates from the current best |
-| `ExecutionStage` | Calls the LLM with each candidate prompt to generate Python code solutions |
-| `EvaluationStage` | Runs all generated solutions through EvalPlus and collects pass/fail results |
-| `ScoringStage` | Converts EvalPlus results to scalar rewards via `core/reward.py` |
-| `SelectionStage` | Applies the active policy to pick the next seed prompt |
+**Phase 1 — Global Mutation (Pooling Ideas)**
+`EnsembleExecutionStage (Part 1)`: Each model in the ensemble generates *N* prompt variants independently from the current seed. All variants are gathered into a single **Master Prompt Pool**. For example, 3 models generating 5 mutations each yields 15 unique candidate prompts.
 
-Stages are wired together in `run_optimization.py` and executed sequentially by `PromptEvolutionWorkflow.run_generation()`. Inserting a new stage (e.g. a deduplication or diversity filter) requires no changes to existing stages.
+**Phase 2 — Cross-Execution & Evaluation (The Matrix)**
+`EnsembleExecutionStage (Part 2)` & `EvaluationStage`: Every prompt in the master pool is tested on **every** model in the ensemble. Each model uses all 15 prompts to generate code for every benchmark task, which is then run through EvalPlus. This creates a dense score matrix (e.g., 15 prompts × 3 models).
 
-### 3.5 Pluggable selection policies
+**Phase 3 — Scoring & Selection**
+`EnsembleScoringStage`: Aggregates each prompt's per-model scores into a single combined reward using a configurable strategy (`mean`, `min`, or `max`). The default `mean` strategy ensures the selected prompt must perform **consistently well across all models**, not just over-index on one.
+`SelectionStage`: Applies the active policy (e.g., greedy) to pick the highest-scoring universal prompt as the next seed.
+
+This cross-testing approach prevents prompt overfitting to a single model and mathematically guarantees that the winning prompt has been battle-tested across multiple LLM architectures.
+
+### 3.5 Single-Model Execution (Subset)
+
+While Synthenexa is designed for multi-model discovery, it can also run in a single-model mode for rapid testing or budget-constrained experiments. In this mode, the matrix collapses to a 1D vector:
+- `MutationStage`: A single LLM generates all candidates.
+- `ExecutionStage`: The same LLM generates code from those candidates.
+- `ScoringStage`: Evaluates and scores without needing an aggregation strategy.
+
+### 3.6 Pluggable selection policies
 
 The `pipeline/policies/` package follows a simple strategy pattern. Both `GreedyPolicy` and `EpsilonGreedyPolicy` inherit from `Policy` and implement a single `select(candidates, scores)` method. `PolicyRegistry` maps CLI strings to policy classes, making it trivial to add new strategies (e.g. UCB, softmax sampling) without modifying the workflow controller.
+
+### 3.7 Results Web UI
+
+A lightweight FastAPI application (`synthenexa_pipeline/api.py`) serves a browser-based dashboard for viewing experiment results. After running the pipeline, start the web server:
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+The dashboard reads from `experiments/artifacts/` and renders results via `templates/index.html` at `http://localhost:8000`. This provides a faster way to inspect experiment outputs compared to browsing the filesystem directly.
 
 ---
 
@@ -162,7 +188,7 @@ The `.devcontainer/` directory provides a fully automated, reproducible setup us
 | Concern | How it's handled |
 |---|---|
 | Python 3.11 | Pre-installed in `mcr.microsoft.com/devcontainers/python:3.11` |
-| System deps | `build-essential`, `curl`, `libpq-dev` installed in the Dockerfile |
+| System deps | `build-essential`, `curl` installed in the Dockerfile |
 | pip deps | `pip install -r requirements.txt` runs automatically via `postCreateCommand` |
 | `PYTHONPATH` | Set to `/workspaces/Synthenexa/synthenexa_pipeline` via `remoteEnv` in `devcontainer.json` |
 | Ollama bridge | `host.docker.internal:22000` routes to an Ollama process on the developer's host machine |
@@ -178,6 +204,8 @@ Host machine
 │
 └── Docker
     └── app container  (Python 3.11, all deps, workspace mounted)
+        ├── SQLite DB      (experiments/synthenexa.db — zero-config)
+        └── FastAPI UI     (localhost:8000 — results viewer)
 ```
 
 The workspace directory is bind-mounted into the container, so code edits in VS Code are reflected immediately without rebuilding.
@@ -266,7 +294,7 @@ Production runs would benefit from:
 
 ### API surface
 
-Currently the only interface is the CLI (`run_optimization.py`). A REST or gRPC API layer would allow triggering runs programmatically, integrating with CI/CD, and building a front-end dashboard for experiment comparison.
+The project currently offers two interfaces: the CLI (`run_optimization.py`) for running experiments, and a lightweight FastAPI server (`api.py`) for browsing results. A production API layer would extend this to allow triggering runs programmatically, integrating with CI/CD, and expanding the dashboard into a full experiment comparison tool.
 
 ### Security & secrets management
 

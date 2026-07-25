@@ -1,9 +1,9 @@
 # 🚀 Synthenexa — Quick Start Guide
 
-Synthenexa is an **iterative LLM code-optimization system** that generates, evaluates, and refines Python code using reinforcement-style feedback loops:
+Synthenexa is an **iterative LLM prompt-optimization system** that automatically discovers universal, model-agnostic instructions by cross-testing them across multiple LLMs:
 
 ```
-Prompt → Code Generator → Evaluator → Refiner → Improved Code
+Seed Prompt → Mutated Prompts → Cross-Model Code Gen → Evaluation (EvalPlus) → Refined Universal Prompt
 ```
 
 ---
@@ -13,13 +13,13 @@ Prompt → Code Generator → Evaluator → Refiner → Improved Code
 ```
 ┌──────────────┐    ┌──────────────┐    ┌──────────────────────┐
 │  LLM Service │    │  Eval Service│    │  Storage / Tracker   │
-│  (adapters)  │───▶│  (EvalPlus)  │───▶│  (file or postgres)  │
+│  (adapters)  │───▶│  (EvalPlus)  │───▶│  (file or sqlite)    │
 └──────────────┘    └──────────────┘    └──────────────────────┘
         │                                          │
         ▼                                          ▼
 ┌──────────────────────────────────────────────────────────────┐
 │                    run_optimization.py                       │
-│   Generations × Mutations → Selects best prompt via policy  │
+│    Pool Mutations → Cross-Test → Score → Select Best Prompt  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -28,7 +28,7 @@ Prompt → Code Generator → Evaluator → Refiner → Improved Code
 | `synthenexa_pipeline/scripts/run_optimization.py` | Main entry point — orchestrates the full evolution loop |
 | `synthenexa_pipeline/services/llm/` | Provider-agnostic LLM adapters (OpenAI, Gemini, Ollama, Groq, etc.) |
 | `synthenexa_pipeline/services/eval_service.py` | Runs generated code against test cases via [EvalPlus](https://github.com/evalplus/evalplus) |
-| `synthenexa_pipeline/services/storage.py` | Writes experiment artifacts to the filesystem |
+| `synthenexa_pipeline/services/storage.py` | Writes experiment artifacts to the filesystem or SQLite |
 | `synthenexa_pipeline/core/` | Shared models, config, reward functions, and metrics |
 | `synthenexa_pipeline/pipeline/` | Prompt evolution strategies (greedy, epsilon-greedy) |
 | **Ollama** | Optional — run open-weight models locally (e.g. `qwen3-coder-next:cloud`) |
@@ -104,12 +104,13 @@ python synthenexa_pipeline/scripts/run_optimization.py \
   --policy epsilon_greedy --epsilon 0.2 --experiment exploratory_run
 ```
 
-### Multi-model comparison
+### Ensemble cross-testing (Multi-model discovery)
 
 ```bash
 python synthenexa_pipeline/scripts/run_optimization.py \
   --models openai:gpt-4o,gemini:gemini-2.0-flash,nemotron-3-super:cloud \
-  --generations 5 --mutations 10 --experiment large_scale_multi_model
+  --ensemble --ensemble-strategy mean \
+  --generations 5 --mutations 10 --experiment multi_model_discovery
 ```
 
 ### Key CLI flags
@@ -135,6 +136,16 @@ synthenexa_pipeline/experiments/artifacts/<run-id>/
 ├── evaluations_gen_X.jsonl   ← Pass/fail results per candidate
 └── snapshot_gen_X.json       ← Full pipeline state at generation X
 ```
+
+### Viewing results in the browser
+
+After running an experiment, start the built-in results viewer:
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+Open `http://localhost:8000` to browse experiment outputs interactively.
 
 ---
 

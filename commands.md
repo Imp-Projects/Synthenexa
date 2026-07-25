@@ -19,31 +19,7 @@ pytest -q
 
 # Pipeline Execution Commands
 
-## 1. Default Model (qwen3-coder-next:cloud) Test Commands
-
-### Single-model smoke test
-```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model qwen3-coder-next:cloud --generations 1 --mutations 1 --experiment smoke_qwen
-```
-
-### Single-model exploratory run (epsilon-greedy)
-```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model qwen3-coder-next:cloud --generations 2 --mutations 3 --policy epsilon_greedy --epsilon 0.2 --experiment epsilon_smoke_qwen
-```
-
-### Run with a different dataset
-```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model qwen3-coder-next:cloud --dataset Dataset/benchmark_mbpp_micro.jsonl --generations 1 --mutations 1 --experiment dataset_smoke_qwen
-```
-
-### Larger realistic run (Single model)
-```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model qwen3-coder-next:cloud --generations 3 --mutations 5 --experiment realistic_run_qwen
-```
-
----
-
-## 2. Interactive & Ensemble Execution Commands
+## 1. Interactive & Ensemble Execution Commands
 
 ### Interactive model selection
 ```bash
@@ -65,64 +41,28 @@ python synthenexa_pipeline/scripts/run_optimization.py --models qwen3-coder-next
 python synthenexa_pipeline/scripts/run_optimization.py --interactive --ensemble --dataset Dataset/benchmark_mbpp_micro.jsonl --generations 2 --mutations 3 --experiment dataset_ensemble_smoke
 ```
 
----
-
-## 3. OpenAI Model Test Commands
-
-### Single-model smoke test
-```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model openai:gpt-4o-mini --generations 1 --mutations 1 --experiment smoke_openai
-```
-
-### Single-model exploratory run (epsilon-greedy)
-```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model openai:gpt-4o-mini --generations 2 --mutations 3 --policy epsilon_greedy --epsilon 0.2 --experiment epsilon_smoke_openai
-```
-
-### Run with a different dataset
-```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model openai:gpt-4o-mini --dataset Dataset/benchmark_mbpp_micro.jsonl --generations 1 --mutations 1 --experiment dataset_smoke_openai
-```
-
-### Larger realistic run (Single model)
-```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model openai:gpt-4o-mini --generations 3 --mutations 5 --experiment realistic_run_openai
-```
+> [!NOTE]
+> The commands above constitute the primary workflow for prompt refinement using an ensemble of LLMs.
 
 ---
 
-## 4. Gemini Model Test Commands
+## Reference: Example Model Commands (Optional)
 
-### Single-model smoke test
+These examples illustrate how individual models can be included within an ensemble. They are provided for reference only and are **not** part of the main workflow.
+
+### OpenAI model in ensemble
 ```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model gemini:gemini-2.0-flash --generations 1 --mutations 1 --experiment smoke_gemini
+python synthenexa_pipeline/scripts/run_optimization.py --models openai:gpt-4o-mini,qwen3-coder-next:cloud --ensemble --ensemble-strategy mean --generations 2 --mutations 2 --experiment openai_ensemble_example
 ```
 
-### Single-model exploratory run (epsilon-greedy)
+### Gemini model in ensemble
 ```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model gemini:gemini-2.0-flash --generations 2 --mutations 3 --policy epsilon_greedy --epsilon 0.2 --experiment epsilon_smoke_gemini
+python synthenexa_pipeline/scripts/run_optimization.py --models gemini:gemini-2.0-flash,qwen3-coder-next:cloud --ensemble --ensemble-strategy mean --generations 2 --mutations 2 --experiment gemini_ensemble_example
 ```
 
-### Run with a different dataset
-```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model gemini:gemini-2.0-flash --dataset Dataset/benchmark_mbpp_micro.jsonl --generations 1 --mutations 1 --experiment dataset_smoke_gemini
-```
-
-### Larger realistic run (Single model)
-```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model gemini:gemini-2.0-flash --generations 3 --mutations 5 --experiment realistic_run_gemini
-```
-
----
-
-## 5. Multi-Model Execution Commands (No Ensemble)
-
-### Multi-model comparison run (across all available providers)
-```bash
-python synthenexa_pipeline/scripts/run_optimization.py --available-models --generations 1 --mutations 1 --experiment multi_model_smoke
-```
-
-### Large-scale realistic run (OpenAI, Gemini, and Qwen)
-```bash
-python synthenexa_pipeline/scripts/run_optimization.py --models openai:gpt-4o,gemini:gemini-2.0-flash,qwen3-coder-next:cloud --generations 5 --mutations 10 --experiment large_scale_multi_model
-```
+### Common flag combinations (reference)
+- `--generations <N>` – Number of generations per model.
+- `--mutations <N>` – Number of prompt mutations per generation.
+- `--ensemble-strategy mean|median|vote` – How ensemble outputs are aggregated.
+- `--dataset <path>` – Specify a custom dataset.
+- `--experiment <name>` – Tag the run for tracking.
