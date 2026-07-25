@@ -49,8 +49,7 @@
   "remoteEnv": {
     "PYTHONPATH": "${containerWorkspaceFolder}/synthenexa_pipeline",
     "PYTHONDONTWRITEBYTECODE": "1",
-    "OLLAMA_BASE_URL": "http://host.docker.internal:22000",
-    "POSTGRES_HOST": "db"
+    "OLLAMA_BASE_URL": "http://host.docker.internal:22000"
   },
   "remoteUser": "vscode"
 }

@@ -11,39 +11,4 @@ services:
     environment:
       PYTHONPATH: /workspaces/Synthenexa/synthenexa_pipeline
       PYTHONDONTWRITEBYTECODE: "1"
-      POSTGRES_HOST: db
-    depends_on:
-      db:
-        condition: service_healthy
 
-  db:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: synthenexa
-      POSTGRES_USER: synthenexa
-      POSTGRES_PASSWORD: synthenexa
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U synthenexa -d synthenexa"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
-  pgadmin:
-    image: dpage/pgadmin4
-    restart: unless-stopped
-    environment:
-      PGADMIN_DEFAULT_EMAIL: admin@synthenexa.com
-      PGADMIN_DEFAULT_PASSWORD: admin
-    ports:
-      - "5051:80"
-    depends_on:
-      db:
-        condition: service_healthy
-
-volumes:
-  postgres_data:
