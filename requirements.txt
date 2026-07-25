@@ -24,3 +24,7 @@ google-genai==1.73.1
 # Database (SQLite — no extra driver needed, SQLAlchemy only)
 sqlalchemy==2.0.23
 
+# Web Interface
+fastapi>=0.104.1
+uvicorn>=0.24.0
+jinja2>=3.1.2
