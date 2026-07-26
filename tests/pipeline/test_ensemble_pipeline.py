@@ -96,6 +96,25 @@ class EnsembleScoringStageTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             EnsembleScoringStage(strategy="median")  # type: ignore
 
+    def test_selection_does_not_overwrite_global_best(self):
+        from pipeline.prompt_evolution.stages.selection import SelectionStage
+        from pipeline.prompt_evolution.policies.greedy import GreedySelectionPolicy
+
+        ctx = self._context_with_ensemble_scores({
+            "prompt_a": {"ModelA": 0.4, "ModelB": 0.4},
+            "prompt_b": {"ModelA": 0.9, "ModelB": 0.9},
+        })
+        ctx.scores = {"prompt_a": 0.4, "prompt_b": 0.9}
+        ctx.best_prompt = PromptCandidate(id="global_best", text="Best so far")
+        ctx.best_score = 0.95
+
+        stage = SelectionStage(policy=GreedySelectionPolicy())
+        ctx = stage.run(ctx)
+
+        self.assertEqual(ctx.best_prompt.id, "global_best")
+        self.assertAlmostEqual(ctx.best_score, 0.95)
+        self.assertEqual(ctx.current_prompt.id, "prompt_b")
+
 
 class EnsembleExecutionStageTests(unittest.TestCase):
     def _make_mut_stage(self, model_name: str) -> MagicMock:
