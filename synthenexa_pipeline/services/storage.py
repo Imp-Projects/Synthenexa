@@ -10,8 +10,7 @@ The backend is selected at construction time via the ``backend=`` kwarg
 (which defaults to the ``STORAGE_BACKEND`` env var, which itself defaults to
 "file"). The public API is identical for both backends.
 
-``"local"`` is accepted as an alias for ``"file"`` so that users switching
-away from the old ``"postgres"`` setting have a familiar fallback keyword.
+``"local"`` is accepted as an alias for ``"file"`` for convenience.
 """
 import json
 import os
@@ -314,7 +313,7 @@ class StorageService:
         self._backend.save_run_log(log_entry)
 
     # ---------------------------------------------------------------- #
-    #  File-backend helpers (pass-through; no-op on postgres)           #
+    #  File-backend helpers (pass-through; no-op on sqlite)              #
     # ---------------------------------------------------------------- #
 
     def save_jsonl(self, filename: str, data: List[Dict[str, Any]]) -> None:
