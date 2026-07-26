@@ -22,16 +22,17 @@ class SelectionStage(Stage):
             reverse=True
         )
         
-        # Track the absolute best this generation regardless of selection policy's explore/exploit
-        if top_candidates:
-            context.best_prompt = top_candidates[0]
-            context.best_score = context.scores.get(top_candidates[0].id, 0.0)
-            
         # The policy determines the *next* prompt (handles epsilon-greedy logic)
         next_prompts = self.policy.select(context.candidate_prompts, context.scores)
         if next_prompts:
             context.current_prompt = next_prompts[0]
             print(f"  Selected best prompt:")
+            print(f"    {context.current_prompt.id}")
+            print(f"    score={context.scores.get(context.current_prompt.id, 0.0):.4f}\n")
+        elif top_candidates:
+            # Fallback to the top-scoring candidate if the policy returns nothing.
+            context.current_prompt = top_candidates[0]
+            print(f"  Policy returned no prompt; falling back to top candidate:")
             print(f"    {context.current_prompt.id}")
             print(f"    score={context.scores.get(context.current_prompt.id, 0.0):.4f}\n")
             
