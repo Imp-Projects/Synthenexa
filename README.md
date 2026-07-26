@@ -4,6 +4,8 @@ Synthenexa is a prototype that tackles a practical problem in working with large
 
 Instead of relying on manual prompt engineering or over-fitting to a single provider, Synthenexa automates the discovery of robust, model-agnostic prompts. It starts with a base prompt, asks multiple LLMs to independently generate improved variations, cross-tests how well every variation performs across all models on a real coding task, and uses the combined results to produce an even better prompt in the next round. The process repeats until it converges on instructions that perform consistently well regardless of the underlying LLM architecture.
 
+The core objective is to **automatically refine user prompts for better results across LLMs**. Single-model runs are supported for debugging and smoke testing, but the primary workflow is cross-model ensemble evaluation.
+
 ---
 
 ## How the prompt refinement works

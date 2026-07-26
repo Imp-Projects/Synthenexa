@@ -56,7 +56,7 @@ The container pre-configures `PYTHONPATH` and the Ollama bridge (`host.docker.in
 ### Option B — Local Setup
 
 ```bash
-# Create and activate a virtual environment
+# Create and activate a Python 3.11 virtual environment
 python3.11 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
@@ -66,6 +66,8 @@ pip install -r requirements.txt
 # Set PYTHONPATH (add to .bashrc / .zshrc to persist)
 export PYTHONPATH="$(pwd)/synthenexa_pipeline"
 ```
+
+If you prefer a Windows-specific venv, recreate `.venv-win` with Python 3.11 and use that interpreter consistently for local runs and tests.
 
 > Experiment artifacts are written to `synthenexa_pipeline/experiments/artifacts/` by default.
 

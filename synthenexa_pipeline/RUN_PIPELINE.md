@@ -1,6 +1,6 @@
 # Running the Synthenexa Pipeline
 
-This guide will help you run the reinforcement-learning prompt optimization pipeline. The pipeline uses an LLM to repeatedly generate, test, and score new system prompts to find the best instructions for writing Python code.
+This guide will help you run the prompt optimization pipeline. The core workflow is cross-model prompt refinement: multiple LLMs generate prompt variants, the variants are tested across models, and the system keeps the prompt that generalises best.
 
 ## 1. Prerequisites
 
@@ -22,11 +22,11 @@ Navigate to the `synthenexa_pipeline` directory if you aren't already there:
 cd synthenexa_pipeline
 ```
 
-Run the pipeline using the optimization script. Here is the standard command:
+Run the pipeline using the optimization script. The primary workflow is ensemble mode:
 ```bash
-python scripts/run_optimization.py --generations 3 --mutations 5
+python scripts/run_optimization.py --models qwen3-coder-next:cloud,nemotron-3-super:cloud --ensemble --ensemble-strategy mean --generations 3 --mutations 5
 ```
-*This runs 3 evolution generations, creating 5 mutated prompt variations per generation.*
+*This runs 3 evolution generations, creating 5 mutated prompt variations per generation and cross-evaluates them across the selected models.*
 
 ## 3. Useful Command-Line Options
 
@@ -34,10 +34,13 @@ You can customize the pipeline run using several flags:
 
 - `--generations <int>`: How many cycles of evolution to run (Default: 3).
 - `--mutations <int>`: How many new prompt variations to generate per cycle (Default: 5).
-- `--model <name>`: The Ollama model to use for mutations and code generation (Default: `nemotron-3-super:cloud`).
-- `--policy <name>`: How the pipeline selects the best prompt. Use `greedy` to always pick the highest score, or `epsilon_greedy` to occasionally explore random prompts (Default: `greedy`).
+- `--models <list>`: Comma-separated list of models to use for the primary ensemble workflow.
+- `--ensemble`: Enables cross-model prompt refinement, which is the core project objective.
+- `--ensemble-strategy <name>`: How scores are combined across models. Use `mean`, `min`, or `max`.
+- `--model <name>`: Single-model development smoke test mode. Useful for debugging one provider, but not the main workflow.
+- `--policy <name>`: How the pipeline selects the next prompt. Use `greedy` to always pick the highest score, or `epsilon_greedy` to occasionally explore random prompts (Default: `greedy`).
 
-**Example:** Run a quick test with a smaller model:
+**Example:** Run a quick single-model smoke test for development:
 ```bash
 python scripts/run_optimization.py --generations 2 --mutations 3 --model qwen3-coder-next:cloud
 ```
