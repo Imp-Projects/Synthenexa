@@ -1,110 +1,24 @@
-"""
-services/eval_service.py — Execute generated code against MBPP/HumanEval test harnesses.
+"""Execute generated code against MBPP/HumanEval test harnesses.
 
-Key design:
-  - Each MBPP task ships its own `check(candidate)` function in the `test` field.
-  - We exec() the generated code, then call check(entry_point_fn) to run assertions.
-  - Syntax errors are tracked separately from logic/assertion errors.
-  - All execution is sandboxed in an isolated globals dict (no real sandbox — see warning).
-
-WARNING: exec() of arbitrary LLM-generated code is inherently unsafe.
-         In production, wrap this in a Docker container or subprocess with resource limits.
+The public API stays the same, but execution now happens inside a sandboxed
+child process instead of the main pipeline process.
 """
-import time
-import traceback
+
+from __future__ import annotations
+
 from typing import Any, Dict, List
 
+from services.eval_sandbox import SandboxEvaluator
 
-# ------------------------------------------------------------------ #
-#  Standalone helper (used by stages/evaluation.py directly)         #
-# ------------------------------------------------------------------ #
-
-def run_code_on_task(code: str, task: dict) -> Dict[str, Any]:
-    """
-    Run a single generated code string against one MBPP/HumanEval task.
-
-    Returns:
-        {
-            "passed":        bool,
-            "error_category": "ok" | "syntax_error" | "runtime_error" | "assertion_error",
-            "error_message":  str,
-            "elapsed_ms":     float,  # wall-clock execution time in milliseconds
-        }
-    """
-    entry_point = task.get("entry_point", "")
-    test_harness = task.get("test", "")
-
-    # Strip markdown fences (belt-and-suspenders, LLMService also strips)
-    clean_code = _strip_fences(code)
-
-    exec_globals: Dict[str, Any] = {}
-    _t_start = time.perf_counter()
-
-    # --- Step 1: exec the generated solution ---
-    try:
-        exec(compile(clean_code, "<generated>", "exec"), exec_globals)
-    except SyntaxError as exc:
-        return {
-            "passed": False,
-            "error_category": "syntax_error",
-            "error_message": str(exc),
-            "elapsed_ms": (time.perf_counter() - _t_start) * 1000,
-        }
-    except Exception as exc:
-        return {
-            "passed": False,
-            "error_category": "runtime_error",
-            "error_message": str(exc),
-            "elapsed_ms": (time.perf_counter() - _t_start) * 1000,
-        }
-
-    # --- Step 2: inject the test harness and call check(fn) ---
-    try:
-        exec(compile(test_harness, "<test_harness>", "exec"), exec_globals)
-
-        # The MBPP harness defines check(candidate); call it with the solution fn.
-        check_fn = exec_globals.get("check")
-        candidate_fn = exec_globals.get(entry_point) if entry_point else None
-
-        if check_fn and candidate_fn:
-            check_fn(candidate_fn)
-        elif check_fn:
-            # Fallback: call check() with no args (some harnesses are self-contained)
-            check_fn()
-        # else: no check function — treat as passed (best-effort)
-
-        return {
-            "passed": True,
-            "error_category": "ok",
-            "error_message": "",
-            "elapsed_ms": (time.perf_counter() - _t_start) * 1000,
-        }
-
-    except AssertionError as exc:
-        return {
-            "passed": False,
-            "error_category": "assertion_error",
-            "error_message": str(exc),
-            "elapsed_ms": (time.perf_counter() - _t_start) * 1000,
-        }
-    except Exception as exc:
-        return {
-            "passed": False,
-            "error_category": "runtime_error",
-            "error_message": traceback.format_exc(limit=3),
-            "elapsed_ms": (time.perf_counter() - _t_start) * 1000,
-        }
-
-
-# ------------------------------------------------------------------ #
-#  EvalService class (used by EvaluationStage)                       #
-# ------------------------------------------------------------------ #
 
 class EvalService:
     """
     Evaluates a batch of code outputs for one prompt candidate
     against the full task list.
     """
+
+    def __init__(self, timeout_seconds: float = 10.0):
+        self._sandbox = SandboxEvaluator(timeout_seconds=timeout_seconds)
 
     def evaluate(
         self,
@@ -127,14 +41,14 @@ class EvalService:
                 "errors":        list[str],
             }
         """
-        passed        = 0
-        failed        = 0
+        passed = 0
+        failed = 0
         syntax_errors = 0
         errors: List[str] = []
         timings: List[float] = []
 
         for code, task in zip(generated_codes, tasks):
-            result = run_code_on_task(code, task)
+            result = self._sandbox.run_code_on_task(code, task)
             elapsed = result.get("elapsed_ms", 0.0)
             timings.append(elapsed)
 
@@ -152,34 +66,18 @@ class EvalService:
                     )
 
         total_ms = sum(timings)
-        min_ms   = min(timings, default=0.0)
-        max_ms   = max(timings, default=0.0)
-        avg_ms   = total_ms / len(timings) if timings else 0.0
+        min_ms = min(timings, default=0.0)
+        max_ms = max(timings, default=0.0)
+        avg_ms = total_ms / len(timings) if timings else 0.0
 
         return {
-            "passed":        passed,
-            "failed":        failed,
-            "total":         len(tasks),
+            "passed": passed,
+            "failed": failed,
+            "total": len(tasks),
             "syntax_errors": syntax_errors,
-            "errors":        errors,
+            "errors": errors,
             "total_time_ms": total_ms,
-            "min_time_ms":   min_ms,
-            "max_time_ms":   max_ms,
-            "avg_time_ms":   avg_ms,
+            "min_time_ms": min_ms,
+            "max_time_ms": max_ms,
+            "avg_time_ms": avg_ms,
         }
-
-
-# ------------------------------------------------------------------ #
-#  Internal helpers                                                   #
-# ------------------------------------------------------------------ #
-
-def _strip_fences(code: str) -> str:
-    """Remove markdown code fences from LLM output."""
-    code = code.strip()
-    if code.startswith("```"):
-        lines = code.splitlines()
-        lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        code = "\n".join(lines).strip()
-    return code
