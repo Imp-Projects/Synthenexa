@@ -1,7 +1,7 @@
 """
 scripts/inspect_experiments.py -- CLI tool to inspect experiment results.
 
-Works with both storage backends. Use --storage to override STORAGE_BACKEND.
+Works with the file backend and SQLite backend. Use --storage to override STORAGE_BACKEND.
 
 Sub-commands
 ------------
@@ -12,7 +12,7 @@ Sub-commands
 
 Usage (run from synthenexa_pipeline/):
     python scripts/inspect_experiments.py list
-    python scripts/inspect_experiments.py --storage postgres list
+    python scripts/inspect_experiments.py --storage sqlite list
     python scripts/inspect_experiments.py show a1915724
     python scripts/inspect_experiments.py best a1915724
     python scripts/inspect_experiments.py compare
@@ -126,10 +126,10 @@ class FileInspector:
 
 
 # ======================================================================= #
-#  Postgres backend readers                                                #
+#  SQLite backend readers                                                   #
 # ======================================================================= #
 
-class PostgresInspector:
+class SQLiteInspector:
     def __init__(self):
         from services.database import get_database_manager
         from core.config import DatabaseConfig
@@ -332,14 +332,14 @@ def cmd_compare(inspector: Any, as_json: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Inspect Synthenexa experiment results (file or postgres backend).",
+        description="Inspect Synthenexa experiment results (file or sqlite backend).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--storage",
         type=str,
         default=None,
-        choices=["file", "postgres"],
+        choices=["file", "sqlite"],
         help="Storage backend (overrides STORAGE_BACKEND env var).",
     )
     parser.add_argument(
@@ -361,11 +361,11 @@ def main() -> None:
     args = parser.parse_args()
     backend = (args.storage or STORAGE_BACKEND).lower()
 
-    if backend == "postgres":
+    if backend == "sqlite":
         try:
-            inspector: Any = PostgresInspector()
+            inspector: Any = SQLiteInspector()
         except Exception as exc:
-            print(f"[ERROR] Could not connect to PostgreSQL: {exc}")
+            print(f"[ERROR] Could not connect to SQLite: {exc}")
             sys.exit(1)
     else:
         inspector = FileInspector(args.artifacts_dir)
