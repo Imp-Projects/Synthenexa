@@ -79,6 +79,37 @@ class DatabaseManager:
         )
         from core.config import Base
         Base.metadata.create_all(self._engine)
+        self._apply_sqlite_compat_migrations()
+
+    def _apply_sqlite_compat_migrations(self) -> None:
+        """Backfill analysis-related columns for existing local SQLite files."""
+        column_defs = {
+            "evaluations": {
+                "evaluator_model": "VARCHAR(255)",
+                "total_time_ms": "FLOAT DEFAULT 0.0",
+                "min_time_ms": "FLOAT DEFAULT 0.0",
+                "max_time_ms": "FLOAT DEFAULT 0.0",
+                "avg_time_ms": "FLOAT DEFAULT 0.0",
+            },
+            "snapshots": {
+                "best_ensemble_scores": "JSON",
+                "model_leaderboard": "JSON",
+                "ensemble_scores": "JSON",
+            },
+        }
+
+        with self.engine.begin() as connection:
+            for table_name, columns in column_defs.items():
+                existing = {
+                    row[1]
+                    for row in connection.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
+                }
+                for column_name, column_type in columns.items():
+                    if column_name in existing:
+                        continue
+                    connection.execute(
+                        text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+                    )
 
     @property
     def engine(self) -> Engine:

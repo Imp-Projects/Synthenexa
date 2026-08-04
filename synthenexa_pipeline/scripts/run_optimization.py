@@ -34,7 +34,7 @@ if _PIPELINE not in sys.path:
 # ─────────────────────────────────────────────────────────────────────────────
 
 import requests
-from core.config import DATASET_PATH, MODEL_NAME, NUM_MUTATIONS, RLConfig, STORAGE_BACKEND
+from core.config import DATASET_PATH, MODEL_NAME, NUM_MUTATIONS, STORAGE_BACKEND, RLConfig
 from core.context import PipelineContext
 from core.schema import PromptCandidate
 from pipeline.prompt_evolution.policies.registry import PolicyRegistry
@@ -62,6 +62,7 @@ def init_database() -> bool:
     """Create all SQLite tables defined in db_models.py (idempotent)."""
     try:
         from services.database import get_database_manager
+
         db = get_database_manager()
         db.create_all_tables()
         print("[INFO] SQLite schema initialised successfully.")
@@ -161,7 +162,6 @@ def _priority_sorted_models(
     return result
 
 
-
 def _safe_name(model_name: str) -> str:
     """Create a filesystem-safe experiment name from a model identifier."""
     return re.sub(r"[^A-Za-z0-9._-]+", "_", model_name).strip("._-")
@@ -169,34 +169,35 @@ def _safe_name(model_name: str) -> str:
 
 def _interactive_model_selection(args) -> list[str]:
     from utils.ollama_client import get_available_ollama_models
+
     print("\n*** Dynamic Ollama Model Selection ***")
     print("Fetching available local Ollama models...\n")
     models = get_available_ollama_models()
-    
+
     if not models:
         print("[ERROR] No models found or Ollama is unreachable. Falling back to default.")
         return [MODEL_NAME]
-    
+
     print("Available Ollama models:\n")
     for idx, m in enumerate(models, 1):
         print(f"{idx}. {m}")
-        
+
     print("\nChoose a model number, or enter multiple numbers (e.g. 1,2) to run multiple models sequentially.")
     print("You can also enter '0' or 'all' to run all available models.")
-    
+
     try:
         user_input = input("Selection: ").strip()
     except (EOFError, KeyboardInterrupt):
         print("\n[ERROR] Selection aborted. Falling back to default.")
         return [MODEL_NAME]
-        
+
     if not user_input:
         print("[ERROR] Empty selection. Falling back to default.")
         return [MODEL_NAME]
-        
+
     if user_input.lower() in ("0", "all"):
         return models
-        
+
     selected_models = []
     for part in user_input.split(","):
         part = part.strip()
@@ -208,11 +209,11 @@ def _interactive_model_selection(args) -> list[str]:
                 print(f"[warn] Ignored invalid index: {idx}")
         else:
             print(f"[warn] Ignored invalid input: {part}")
-            
+
     if not selected_models:
         print("[ERROR] No valid selection made. Falling back to default.")
         return [MODEL_NAME]
-        
+
     return selected_models
 
 
@@ -227,7 +228,9 @@ def _resolve_model_list(args) -> list[str]:
       - Locally available Ollama models are appended after cloud models
       - The full list is then priority-sorted
     """
-    excluded: set[str] = {item.strip() for item in (getattr(args, "exclude_models", "") or "").split(",") if item.strip()}
+    excluded: set[str] = {
+        item.strip() for item in (getattr(args, "exclude_models", "") or "").split(",") if item.strip()
+    }
     registry = ModelRegistry()
 
     if getattr(args, "interactive", False):
@@ -239,7 +242,8 @@ def _resolve_model_list(args) -> list[str]:
         # Tier 1 — OpenAI (include if API key present and not suppressed)
         if not getattr(args, "no_openai", False) and os.getenv("OPENAI_API_KEY"):
             openai_models = [
-                m for m in os.getenv(
+                m
+                for m in os.getenv(
                     "OPENAI_MODEL_LIST",
                     "openai:gpt-4o,openai:gpt-4o-mini",
                 ).split(",")
@@ -253,7 +257,8 @@ def _resolve_model_list(args) -> list[str]:
         # Tier 2 — Gemini (include if API key present and not suppressed)
         if not getattr(args, "no_gemini", False) and os.getenv("GEMINI_API_KEY"):
             gemini_models = [
-                m for m in os.getenv(
+                m
+                for m in os.getenv(
                     "GEMINI_MODEL_LIST",
                     "gemini:gemini-2.0-flash,gemini:gemini-1.5-pro",
                 ).split(",")
@@ -355,7 +360,12 @@ def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: 
         run_id=run_id,
         model_name=model_name,
         experiment_name=experiment_name,
-        config_dict={"generations": args.generations, "mutations": args.mutations, "policy": args.policy},
+        config_dict={
+            "generations": args.generations,
+            "mutations": args.mutations,
+            "policy": args.policy,
+            "eval_backend": getattr(args, "eval_backend", "local"),
+        },
     )
     tracker = RLTracker()
 
@@ -475,12 +485,14 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
     model_pipelines = []
     for model_name in model_names:
         llm = LLMService(model=model_name, base_url=args.ollama_base_url)
-        model_pipelines.append((
-            model_name,
-            MutationStage(llm_service=llm, num_mutations=args.mutations),
-            ExecutionStage(llm_service=llm),
-            EvaluationStage(eval_service=eval_service),
-        ))
+        model_pipelines.append(
+            (
+                model_name,
+                MutationStage(llm_service=llm, num_mutations=args.mutations),
+                ExecutionStage(llm_service=llm),
+                EvaluationStage(eval_service=eval_service),
+            )
+        )
 
     # Storage + tracker
     storage_backend = getattr(args, "storage", None) or STORAGE_BACKEND
@@ -496,6 +508,7 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
             "generations": args.generations,
             "mutations": args.mutations,
             "policy": args.policy,
+            "eval_backend": getattr(args, "eval_backend", "local"),
             "ensemble_models": model_names,
             "ensemble_strategy": strategy,
         },
@@ -537,7 +550,7 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
     print("\n" + "=" * 60)
     print("  Optimization Complete!")
     print("=" * 60)
-    
+
     print("\n[SelectionStage] Final winner selected.")
     if final_context.best_prompt:
         print(f"\nBest Universal Prompt (score={final_context.best_score:.4f})")
@@ -545,15 +558,15 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
         print(f"  Model: {final_context.best_prompt.origin_model or 'base'}")
         print(f"  Generation: {final_context.best_prompt.generation}")
         print(f"  Mutation: {final_context.best_prompt.mutation_idx}")
-        
+
         print("\nEvaluated Across:")
         for m, s in sorted(final_context.best_ensemble_scores.items()):
             print(f"  ✓ {m:<22} {s:.4f}")
-            
+
         print("\n" + "-" * 60)
         print(final_context.best_prompt.text)
         print("-" * 60)
-        
+
         print("\n============================================================")
         print(" Model Performance Summary")
         print("============================================================")
@@ -567,13 +580,13 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
         print("Prompt generated by:")
         print(f"{final_context.best_prompt.origin_model or 'base'}\n")
         print("Performance:\n")
-        
+
         for m, s in sorted(final_context.best_ensemble_scores.items()):
             print(f"{m}:")
             filled = int(s * 10)
             bar = "█" * filled + "░" * (10 - filled)
-            print(f"{bar} {s*100:.0f}%\n")
-            
+            print(f"{bar} {s * 100:.0f}%\n")
+
         print("Mean Reward:")
         print(f"{final_context.best_score:.4f}\n")
 
@@ -686,6 +699,13 @@ def main():
         "--experiment", type=str, default="", help="Experiment name (used for artifact directory naming)."
     )
     parser.add_argument(
+        "--eval-backend",
+        type=str,
+        default="local",
+        choices=["local"],
+        help="Evaluation backend for the current workflow. The ensemble pipeline currently uses the local exec() evaluator.",
+    )
+    parser.add_argument(
         "--storage",
         type=str,
         default=None,
@@ -702,12 +722,12 @@ def main():
     parser.add_argument(
         "--init-db",
         action="store_true",
-        help="Create the SQLite schema (experiments/synthenexa.db). Safe to run multiple times."
+        help="Create the SQLite schema (experiments/synthenexa.db). Safe to run multiple times.",
     )
     parser.add_argument(
         "--export-artifacts",
         action="store_true",
-        help="Export JSON artifact reports (e.g., best_prompt.json, summary.json). Default is False unless using 'file' storage."
+        help="Export JSON artifact reports (e.g., best_prompt.json, summary.json). Default is False unless using 'file' storage.",
     )
     parser.add_argument(
         "--ensemble",
@@ -723,12 +743,14 @@ def main():
         "--ensemble-strategy",
         type=str,
         default="mean",
-        choices=["mean", "min", "max"],
+        choices=["mean", "min", "median", "max", "vote"],
         help=(
             "How to aggregate per-model scores in ensemble mode: "
             "'mean' (default) rewards consistent cross-model performance; "
             "'min' rewards prompts that never fail on any model; "
-            "'max' rewards prompts that excel on at least one model."
+            "'median' rewards the typical model response while ignoring outliers; "
+            "'max' rewards prompts that excel on at least one model; "
+            "'vote' is ranking-based and counts the fraction of models that picked the prompt as best."
         ),
     )
     args = parser.parse_args()

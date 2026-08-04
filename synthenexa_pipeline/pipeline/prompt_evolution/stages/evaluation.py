@@ -41,6 +41,8 @@ class EvaluationStage(Stage):
                 passed=summary["passed"],
                 failed=summary["failed"],
                 total=summary["total"],
+                syntax_errors=summary.get("syntax_errors", 0),
+                errors=summary.get("errors", []),
                 total_time_ms=summary.get("total_time_ms", 0.0),
                 min_time_ms=summary.get("min_time_ms", 0.0),
                 max_time_ms=summary.get("max_time_ms", 0.0),

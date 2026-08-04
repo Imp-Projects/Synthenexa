@@ -79,6 +79,9 @@ class FileStorageBackend:
             "best_prompt_text": context.best_prompt.text if context.best_prompt else None,
             "scores":           context.scores,
             "reward_history":   context.reward_history,
+            "best_ensemble_scores": context.best_ensemble_scores,
+            "model_leaderboard": context.model_leaderboard,
+            "ensemble_scores":   context.ensemble_scores,
         }
         path = os.path.join(self.base_dir, f"snapshot_gen_{generation}.json")
         with open(path, "w", encoding="utf-8") as f:
@@ -184,11 +187,16 @@ class SQLiteStorageBackend:
                     prompt_id=r.prompt_id,
                     experiment_id=self._experiment_id,
                     generation=generation,
+                    evaluator_model=getattr(r, "evaluator_model", "") or None,
                     passed=r.passed,
                     failed=r.failed,
                     total=r.total,
                     syntax_errors=getattr(r, "syntax_errors", 0),
                     errors=getattr(r, "errors", None),
+                    total_time_ms=getattr(r, "total_time_ms", 0.0),
+                    min_time_ms=getattr(r, "min_time_ms", 0.0),
+                    max_time_ms=getattr(r, "max_time_ms", 0.0),
+                    avg_time_ms=getattr(r, "avg_time_ms", 0.0),
                 ))
 
     def save_generation_snapshot(self, context: Any, generation: int) -> None:
@@ -205,6 +213,9 @@ class SQLiteStorageBackend:
                 best_prompt_text=context.best_prompt.text if context.best_prompt else None,
                 scores=context.scores,
                 reward_history=context.reward_history,
+                best_ensemble_scores=context.best_ensemble_scores,
+                model_leaderboard=context.model_leaderboard,
+                ensemble_scores=context.ensemble_scores,
             ))
 
     def save_run_log(self, log_entry: Dict[str, Any]) -> None:

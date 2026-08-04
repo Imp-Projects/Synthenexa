@@ -3,11 +3,11 @@
   "dockerComposeFile": "docker-compose.yml",
   "service": "app",
   "workspaceFolder": "/workspaces/Synthenexa",
+
   "forwardPorts": [],
-  "runArgs": [
-    "--add-host=host.docker.internal:host-gateway"
-  ],
-  "postCreateCommand": "pip install -r requirements.txt",
+
+  "postCreateCommand": "python -m pip install --upgrade pip setuptools wheel && python -m pip install h11==0.14.0 && python -m pip install -r requirements.txt",
+
   "customizations": {
     "vscode": {
       "extensions": [
@@ -20,6 +20,7 @@
       "settings": {
         "python.defaultInterpreterPath": "/usr/local/bin/python",
         "python.terminal.activateEnvironment": false,
+
         "[python]": {
           "editor.formatOnSave": true,
           "editor.defaultFormatter": "charliermarsh.ruff",
@@ -27,29 +28,34 @@
             "source.organizeImports": "explicit"
           }
         },
+
         "files.exclude": {
           "**/__pycache__": true,
           "**/.pyc": true,
           "**/.venv": true,
           "**/venv": true,
           "**/.pytest_cache": true,
-          "**/experiments/artifacts": true
+          "**/experiments/artifacts": false
         },
+
         "files.watcherExclude": {
           "**/__pycache__/**": true,
           "**/.venv/**": true,
           "**/venv/**": true,
           "**/experiments/artifacts/**": true
         },
+
         "git.enableSmartCommit": true,
         "terminal.integrated.defaultProfile.linux": "bash"
       }
     }
   },
+
   "remoteEnv": {
     "PYTHONPATH": "${containerWorkspaceFolder}/synthenexa_pipeline",
     "PYTHONDONTWRITEBYTECODE": "1",
-    "OLLAMA_BASE_URL": "http://host.docker.internal:22000"
+    "OLLAMA_BASE_URL": "http://host.docker.internal:11434"
   },
+
   "remoteUser": "vscode"
 }

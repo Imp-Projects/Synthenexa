@@ -36,9 +36,21 @@ You can customize the pipeline run using several flags:
 - `--mutations <int>`: How many new prompt variations to generate per cycle (Default: 5).
 - `--models <list>`: Comma-separated list of models to use for the primary ensemble workflow.
 - `--ensemble`: Enables cross-model prompt refinement, which is the core project objective.
-- `--ensemble-strategy <name>`: How scores are combined across models. Use `mean`, `min`, or `max`.
+- `--ensemble-strategy <name>`: How scores are combined across models. Use `mean`, `min`, `median`, `max`, or `vote`.
 - `--model <name>`: Single-model development smoke test mode. Useful for debugging one provider, but not the main workflow.
 - `--policy <name>`: How the pipeline selects the next prompt. Use `greedy` to always pick the highest score, or `epsilon_greedy` to occasionally explore random prompts (Default: `greedy`).
+
+### Ensemble strategy guidance
+
+All ensemble strategies require at least 2 models because the ensemble stage performs cross-evaluation.
+
+- `mean`: Best default for smooth optimization. Works well as soon as you have 2 or more models and at least 2 prompt variants in the pool, but it is most informative when you generate several mutations per model so one noisy score does not dominate the average.
+- `min`: Conservative choice for robustness. Works with 2 or more models, but it is most meaningful when each model has had a real chance to disagree, so use multiple mutations per model rather than a single candidate.
+- `median`: Robust to one noisy or extreme model. Works with 2 or more models, but is most useful when you have at least 3 model scores for each prompt so the middle value is not just an average of two scores.
+- `max`: Specialist or exploratory choice. Works with 2 or more models, but can over-favor prompts that only fit one model well, so it is best used when you explicitly want to discover model-specific wins.
+- `vote`: Ranking-based consensus choice. Each model votes for the candidate prompt it scored highest, and the output is the share of model votes received by that candidate. It requires multiple candidate variations or mutations so the models have something meaningful to rank, and it works best with 3 or more models.
+
+Practical rule of thumb: if you are only running 1 mutation per model, the ensemble still works, but `vote` becomes much less informative because there are too few prompt variations to compare.
 
 **Example:** Run a quick single-model smoke test for development:
 ```bash
@@ -54,3 +66,5 @@ All detailed logs and artifacts are automatically saved in the `experiments/arti
 - **`prompts_gen_X.jsonl`**: The candidate prompts generated during generation X.
 - **`evaluations_gen_X.jsonl`**: The pass/fail results for every candidate.
 - **`snapshot_gen_X.json`**: The complete state of the pipeline at that generation.
+
+The Web UI is a presentation layer on top of those artifacts: it reads the latest run summary, then renders a small set of charts that highlight score progression, winning prompts, and prompt-pool trends. It is intentionally focused on visual proof of improvement rather than raw artifact browsing.

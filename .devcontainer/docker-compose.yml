@@ -1,4 +1,3 @@
-version: "3.8"
 services:
   app:
     image: ghcr.io/imp-projects/synthenexa-devcontainer:latest
@@ -7,8 +6,9 @@ services:
       dockerfile: .devcontainer/Dockerfile
     volumes:
       - ..:/workspaces/Synthenexa:cached
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: sleep infinity
     environment:
       PYTHONPATH: /workspaces/Synthenexa/synthenexa_pipeline
       PYTHONDONTWRITEBYTECODE: "1"
-

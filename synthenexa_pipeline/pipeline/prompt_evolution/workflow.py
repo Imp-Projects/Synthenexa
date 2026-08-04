@@ -53,7 +53,63 @@ class PromptEvolutionWorkflow:
         ctx = self.context
         ctx.max_generations = generations
 
-        # Seed current_prompt from base_prompt on the very first run
+        # -------------------------------------------------------------
+        #  Gen-0: Evaluate the base prompt to establish a baseline
+        # -------------------------------------------------------------
+        if ctx.base_prompt is not None:
+            ctx.generation = 0
+            print(f"\n{'='*60}")
+            print(f"  Generation 0 / {generations} (Baseline Evaluation)")
+            print(f"{'='*60}\n")
+            
+            # Setup Gen-0 state: candidate is just the base prompt
+            ctx.candidate_prompts = [ctx.base_prompt]
+            
+            # Run only Execution, Evaluation, and Scoring (skip Mutation & Selection)
+            # Find the index of ExecutionStage (or EnsembleExecutionStage)
+            start_idx = 0
+            for i, stage in enumerate(self.stages):
+                if "Execution" in stage.__class__.__name__:
+                    start_idx = i
+                    break
+            
+            # Run the evaluation/scoring pipeline for Gen-0
+            for stage in self.stages[start_idx:]:
+                # We skip SelectionStage in Gen-0 so it doesn't try to pick the "best" mutant
+                if "Selection" not in stage.__class__.__name__:
+                    ctx = stage.run(ctx)
+            
+            # The base prompt is intrinsically the best prompt for Gen-0
+            ctx.best_prompt = ctx.base_prompt
+            # EnsembleScoringStage populates ctx.scores
+            ctx.best_score = ctx.scores.get(ctx.base_prompt.id, 0.0)
+            ctx.best_ensemble_scores = ctx.eval_results_by_model if hasattr(ctx, "eval_results_by_model") else {}
+
+            ctx.reward_history[0] = ctx.best_score
+
+            if self.storage:
+                self.storage.save_generation_snapshot(ctx, 0)
+                self.storage.save_prompts(ctx.candidate_prompts, 0)
+                eval_list = []
+                if ctx.eval_results_by_model:
+                    for model_results in ctx.eval_results_by_model.values():
+                        eval_list.extend(model_results.values())
+                else:
+                    eval_list = list(ctx.eval_results.values())
+                if eval_list:
+                    self.storage.save_evaluations(eval_list, 0)
+
+            if self.tracker:
+                self.tracker.log_generation(
+                    generation=0,
+                    avg_reward=ctx.best_score,
+                    best_prompt=ctx.best_prompt,
+                    stats={"scores": ctx.scores, "best_score": ctx.best_score},
+                )
+            
+            ctx.reset_for_next_generation()
+
+        # Seed current_prompt from base_prompt for Gen-1 mutations
         if ctx.current_prompt is None and ctx.base_prompt is not None:
             ctx.current_prompt = ctx.base_prompt
 
@@ -81,7 +137,12 @@ class PromptEvolutionWorkflow:
             if self.storage:
                 self.storage.save_generation_snapshot(ctx, gen)
                 self.storage.save_prompts(ctx.candidate_prompts, gen)
-                eval_list = list(ctx.eval_results.values())
+                eval_list = []
+                if ctx.eval_results_by_model:
+                    for model_results in ctx.eval_results_by_model.values():
+                        eval_list.extend(model_results.values())
+                else:
+                    eval_list = list(ctx.eval_results.values())
                 if eval_list:
                     self.storage.save_evaluations(eval_list, gen)
 

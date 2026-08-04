@@ -78,6 +78,7 @@ class EnsembleExecutionStage(Stage):
         context.candidate_prompts = []
         context.generated_codes = {}
         context.eval_results = {}
+        context.eval_results_by_model = {}
         context.ensemble_scores = {}
 
         # =====================================================================
@@ -149,8 +150,12 @@ class EnsembleExecutionStage(Stage):
             # EvaluationStage: unit-test harness scores the generated code
             context = eval_stage.run(context)
 
+            context.eval_results_by_model[model_name] = {}
+
             # Record this model's reward for every prompt in the pool
             for uid, eval_result in context.eval_results.items():
+                eval_result.evaluator_model = model_name
+                context.eval_results_by_model[model_name][uid] = eval_result
                 context.ensemble_scores.setdefault(uid, {})
                 context.ensemble_scores[uid][model_name] = compute_reward(eval_result)
 

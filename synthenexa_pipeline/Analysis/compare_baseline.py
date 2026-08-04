@@ -242,10 +242,28 @@ def _dark(fig, axes):
             sp.set_edgecolor(P["grid"])
 
 
-def _short(pid: str) -> str:
-    from textwrap import shorten
-    label = pid.replace("prompt_0_", "").replace("_cloud", "")
-    return shorten(label, width=26, placeholder="…")
+def _prompt_label(pid: str) -> str:
+    """
+    Convert a raw chained prompt ID into a compact, unique label.
+
+    Raw ID format (chained across generations):
+        prompt_0_gen1_m1_gpt_oss_120b_cloud_gen2_m2_..._gen4_m0_nemotron_3_super_cloud
+
+    Output examples:
+        G1-M1 (gpt-oss)          <- from gen-1
+        G4-M0 (nemotron-3-super) <- from gen-4 mutation
+    """
+    import re
+    # Find all generation segments in the chained ID
+    segments = re.findall(r'gen(\d+)_m(\d+)_([^_](?:[^g]|g(?!en\d))*)', pid)
+    if not segments:
+        # Fallback for simple / unexpected IDs
+        return pid.replace("prompt_0_", "").replace("_cloud", "")[:22]
+    # Use the LAST segment (the most recent mutation)
+    gen_num, mut_idx, model_part = segments[-1]
+    # Clean the model part: drop trailing '_cloud', normalise underscores
+    model_clean = model_part.rstrip("_").replace("_cloud", "").replace("_", "-").strip("-")
+    return f"G{gen_num}-M{mut_idx} ({model_clean})"
 
 
 def _model_label(raw: str) -> str:
@@ -256,69 +274,125 @@ def plot_delta_chart(ax, base_scores_per_model: dict, exp_scores: dict,
                      best_pid: str, model_names: list):
     """
     Panel A — Score Delta Chart
-    Shows base prompt score vs every mutated variant vs winner.
-    The gap between the base bar and the winner bar = improvement.
+    Shows base prompt score vs the overall winner directly beside it.
     """
     # Compute mean base score across all evaluator models
     base_mean = sum(base_scores_per_model[m]["pass_rate"] for m in model_names) / len(model_names)
+    winner_score = exp_scores.get(best_pid, base_mean)
 
-    # All candidates + base
-    labels = ["[BASE]"] + [_short(k) for k in exp_scores]
-    values = [base_mean] + list(exp_scores.values())
-    raw_keys = [None] + list(exp_scores.keys())
+    labels = ["Original Base Prompt", "Best Refined Prompt"]
+    values = [base_mean, winner_score]
+    colors = [P["base"], P["winner"]]
 
-    colors = []
-    for rk, v in zip(raw_keys, values):
-        if rk is None:
-            colors.append(P["base"])
-        elif rk == best_pid:
-            colors.append(P["winner"])
-        else:
-            colors.append(P["variants"])
+    # We make bars slightly narrower for a cleaner look when there's only two
+    bars = ax.bar(labels, values, color=colors, edgecolor=P["grid"], linewidth=0.6, width=0.4)
 
-    bars = ax.bar(labels, values, color=colors, edgecolor=P["grid"], linewidth=0.6, width=0.6)
-
-    for bar, val, rk in zip(bars, values, raw_keys):
-        face = bar.get_facecolor()
-        weight = "bold" if (rk == best_pid or rk is None) else "normal"
+    for bar, val in zip(bars, values):
         ax.text(bar.get_x() + bar.get_width() / 2, val + 0.012,
                 f"{val:.2%}", ha="center", va="bottom",
-                color=P["text"], fontsize=8.5, fontweight=weight)
+                color=P["text"], fontsize=10, fontweight="bold")
 
     # Draw improvement arrow between base and winner
-    winner_score = exp_scores.get(best_pid, base_mean)
     delta = winner_score - base_mean
-    winner_idx = list(exp_scores.keys()).index(best_pid) + 1  # +1 for base bar
     ax.annotate(
         f"+{delta:.2%}",
-        xy=(winner_idx, winner_score),
+        xy=(1, winner_score),
         xytext=(0, base_mean),
         arrowprops=dict(arrowstyle="->", color=P["winner"], lw=2),
-        color=P["winner"], fontsize=10, fontweight="bold",
+        color=P["winner"], fontsize=11, fontweight="bold",
         ha="center", va="bottom",
     )
 
     ax.set_ylim(0, 1.18)
-    ax.set_ylabel("Ensemble Pass Rate", fontsize=9)
+    ax.set_ylabel("Ensemble Pass Rate", fontsize=10)
     ax.set_title(
-        "[A]  Base Prompt vs. Refined Variants\n"
-        "(Arrow = improvement achieved by Synthenexa)",
+        "[A]  Base Prompt vs. Refined Prompt\n"
+        "(Overall Ensemble Performance)",
         fontsize=11, fontweight="bold", pad=10,
     )
-    ax.tick_params(axis="x", rotation=25, labelsize=8)
+    ax.tick_params(axis="x", labelsize=10)
     ax.axhline(base_mean, color=P["base"], linestyle="--", linewidth=1.0, alpha=0.6)
-
-    legend = [
-        mpatches.Patch(color=P["base"],     label=f"Original base prompt ({base_mean:.2%})"),
-        mpatches.Patch(color=P["variants"], label="Refined variants"),
-        mpatches.Patch(color=P["winner"],   label=f"Best refined prompt ({winner_score:.2%})"),
-    ]
-    ax.legend(handles=legend, fontsize=8, labelcolor=P["text"],
-              facecolor=P["surface"], edgecolor=P["grid"], loc="upper left")
 
 
 def plot_per_model_comparison(ax, base_scores_per_model: dict, eval_rows: list,
-                               best_pid: str, model_names: list):
+                               best_pid: str, model_names: list, exp_scores: dict):
+    """
+    Panel B — Per-Model Performance (Line Chart)
+    Plots the ensemble scores of the best prompt from each generation, for each model,
+    showing the optimization trajectory over time.
+    """
+    import re
+    from collections import defaultdict
+
+    def _gen_num(pid):
+        m = re.search(r'gen(\d+)', pid)
+        return int(m.group(1)) if m else 0
+
+    # 1. Identify the BEST prompt for each generation based on overall ensemble score (exp_scores)
+    # Start with gen 0 (base prompt) if present, or just use 0
+    gen_best = defaultdict(lambda: ("", -1.0))
+    for pid, score in exp_scores.items():
+        g = _gen_num(pid)
+        if score > gen_best[g][1]:
+            gen_best[g] = (pid, score)
+
+    # Make sure we have the generation 0 best_pid mapped to 'base'
+    if 0 not in gen_best:
+        gen_best[0] = ("base_prompt", sum(base_scores_per_model[m]["pass_rate"] for m in model_names) / len(model_names))
+
+    sorted_gens = sorted(gen_best.keys())
+    best_pids_by_gen = {g: gen_best[g][0] for g in sorted_gens}
+
+    # 2. Collect per-model scores for these best prompts
+    # structure: model -> dict of gen -> pass_rate
+    model_trajectories = {m: {} for m in model_names}
+    
+    # Initialize gen 0
+    for m in model_names:
+        model_trajectories[m][0] = base_scores_per_model[m]["pass_rate"]
+
+    # Fill in subsequent generations from eval_rows
+    for row in eval_rows:
+        # row: prompt_id, experiment_id, generation, passed, failed, total, syntax_errors, evaluator_model
+        pid, _, gen, passed, _, total, _, model = row
+        if total > 0 and pid in best_pids_by_gen.values():
+            g = _gen_num(pid)
+            if model in model_trajectories:
+                model_trajectories[model][g] = passed / total
+
+    x_labels = [f"Gen {g}" for g in sorted_gens]
+    x_positions = range(len(sorted_gens))
+
+    # We need colors for up to 5 models. Let's define a small palette for them.
+    line_colors = ["#10b981", "#6366f1", "#f59e0b", "#ec4899", "#8b5cf6"]
+
+    for i, m in enumerate(model_names):
+        y_values = []
+        for g in sorted_gens:
+            # Fallback if a model didn't evaluate a specific prompt for some reason
+            val = model_trajectories[m].get(g, 0.0)
+            y_values.append(val)
+        
+        ax.plot(x_positions, y_values, marker='o', markersize=6, linewidth=2, 
+                color=line_colors[i % len(line_colors)], label=_model_label(m))
+        
+        # Annotate the final generation point
+        if y_values:
+            ax.text(x_positions[-1] + 0.1, y_values[-1], f"{y_values[-1]:.0%}",
+                    va="center", ha="left", fontsize=9, color=line_colors[i % len(line_colors)], fontweight="bold")
+
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(x_labels, fontsize=9)
+    ax.set_ylim(0, 1.18)
+    ax.set_ylabel("Pass Rate", fontsize=9)
+    ax.set_title(
+        "[B]  Per-Model Performance Across Generations\n"
+        "(Tracking the best prompt from each generation)",
+        fontsize=11, fontweight="bold", pad=10,
+    )
+    ax.legend(fontsize=8, labelcolor=P["text"], facecolor=P["surface"], edgecolor=P["grid"])
+    ax.grid(True, axis='y', linestyle='--', alpha=0.1, color=P["grid"])
+
     """
     Panel B — Per-Model Comparison
     For each evaluator model: base score vs winner score.
@@ -386,8 +460,16 @@ def plot_summary_table(ax, base_scores_per_model: dict, exp_scores: dict,
     for m in model_names:
         label = _model_label(m)
         bv = base_scores_per_model[m]["pass_rate"]
-        wv = exp_scores.get(best_pid, 0.0)  # placeholder; per-model winner already shown in B
-        rows.append([f"Pass Rate — {label}", f"{bv:.2%}", "see Panel B"])
+        
+        # Calculate per-model winner score
+        wv = 0.0
+        for row in eval_rows:
+            pid, _, _, passed, _, total, _, model = row
+            if pid == best_pid and model == m and total > 0:
+                wv = passed / total
+                break
+                
+        rows.append([f"Pass Rate — {label}", f"{bv:.2%}", f"{wv:.2%}"])
 
     col_widths = [0.48, 0.26, 0.26]
     header_color = "#2C2C5C"
@@ -485,21 +567,29 @@ def generate_comparison(
     # Load snapshot (winner info)
     cur = con.cursor()
     cur.execute("SELECT generation, best_score, best_prompt_id, scores, best_prompt_text "
-                "FROM snapshots WHERE experiment_id=? ORDER BY generation DESC LIMIT 1", (eid,))
-    snap = cur.fetchone()
-    if not snap:
+                "FROM snapshots WHERE experiment_id=? ORDER BY generation", (eid,))
+    snap_rows = cur.fetchall()
+    if not snap_rows:
         sys.exit("[ERROR] No snapshot found for this experiment.")
 
-    best_pid   = snap[2]
-    winner_text = snap[4] or ""
-    exp_scores  = json.loads(snap[3]) if snap[3] else {}
+    # Merge scores from ALL generations so the best prompt (which may have
+    # been crowned in gen-1 and not repeated in later score dicts) is always
+    # present in exp_scores.
+    exp_scores: dict = {}
+    for snap in snap_rows:
+        gen_scores = json.loads(snap[3]) if snap[3] else {}
+        exp_scores.update(gen_scores)
+
+    last_snap   = snap_rows[-1]
+    best_pid    = last_snap[2]
+    winner_text = last_snap[4] or ""
 
     # Load prompt IDs and eval rows
     cur.execute("SELECT prompt_id FROM prompts WHERE experiment_id=? ORDER BY id", (eid,))
     prompt_ids = [r[0] for r in cur.fetchall()]
 
     cur.execute("SELECT prompt_id, experiment_id, generation, passed, failed, total, "
-                "syntax_errors FROM evaluations WHERE experiment_id=? ORDER BY id", (eid,))
+                "syntax_errors, evaluator_model FROM evaluations WHERE experiment_id=? ORDER BY id", (eid,))
     raw_evals = cur.fetchall()
 
     def _infer_model(pid, candidates):
@@ -510,14 +600,37 @@ def generate_comparison(
                 return m
         return candidates[0] if candidates else "unknown"
 
-    eval_rows = [(*r, _infer_model(r[0], model_names)) for r in raw_evals]
+    eval_rows = []
+    for r in raw_evals:
+        # Check if evaluator_model column is populated (it is at index 7)
+        if len(r) > 7 and r[7]:
+            model = r[7]
+        else:
+            model = _infer_model(r[0], model_names)
+        eval_rows.append((*r[:7], model))
+        
     con.close()
 
     # ── Phase 1: Evaluate base prompt ────────────────────────────────────────
     base_scores_per_model = {}
+    
+    # Try to find generation=0 scores in the database
+    gen0_scores = {}
+    for row in eval_rows:
+        # row: prompt_id, experiment_id, generation, passed, failed, total, syntax_errors, model
+        pid, _, gen, passed, failed, total, syntax, model = row
+        if gen == 0 and total > 0:
+            gen0_scores[model] = {
+                "pass_rate": passed / total,
+                "passed": passed, "failed": failed,
+                "total": total, "syntax_errors": syntax
+            }
 
-    if offline:
-        print("[WARN] --offline mode: using minimum variant score as base estimate.")
+    if len(gen0_scores) == len(model_names):
+        print("\n[Phase 1] Loaded Base Prompt (Gen-0) scores from database.")
+        base_scores_per_model = gen0_scores
+    elif offline:
+        print("[WARN] --offline mode without Gen-0 data: using minimum variant score as base estimate.")
         min_score = _offline_base_score(eval_rows)
         for m in model_names:
             base_scores_per_model[m] = {"pass_rate": min_score, "passed": 0, "failed": 0,
@@ -542,7 +655,11 @@ def generate_comparison(
     base_mean    = sum(base_scores_per_model[m]["pass_rate"] for m in model_names) / len(model_names)
     winner_score = exp_scores.get(best_pid, 0.0)
     delta        = winner_score - base_mean
-    mode_str     = "(offline estimate)" if offline else "(live LLM evaluation)"
+    
+    if len(gen0_scores) == len(model_names):
+        mode_str = "(gen-0 db lookup)"
+    else:
+        mode_str = "(offline estimate)" if offline else "(live LLM evaluation)"
 
     fig.suptitle(
         f"Synthenexa — Prompt Refinement Impact Analysis  {mode_str}\n"
@@ -552,7 +669,7 @@ def generate_comparison(
     )
 
     plot_delta_chart(axA, base_scores_per_model, exp_scores, best_pid, model_names)
-    plot_per_model_comparison(axB, base_scores_per_model, eval_rows, best_pid, model_names)
+    plot_per_model_comparison(axB, base_scores_per_model, eval_rows, best_pid, model_names, exp_scores)
     plot_summary_table(axC, base_scores_per_model, exp_scores, best_pid, base_text, winner_text, model_names)
     plot_prompt_diff(axD, base_text, winner_text)
 

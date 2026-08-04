@@ -71,6 +71,30 @@ class EnsembleScoringStageTests(unittest.TestCase):
 
         self.assertAlmostEqual(ctx.scores["prompt_a"], 0.9)
 
+    def test_median_aggregation(self):
+        ctx = self._context_with_ensemble_scores({
+            "prompt_a": {"ModelA": 0.1, "ModelB": 0.9, "ModelC": 0.7},
+            "prompt_b": {"ModelA": 0.2, "ModelB": 0.4, "ModelC": 0.8, "ModelD": 0.6},
+        })
+        stage = EnsembleScoringStage(strategy="median")
+        ctx = stage.run(ctx)
+
+        self.assertAlmostEqual(ctx.scores["prompt_a"], 0.7)
+        self.assertAlmostEqual(ctx.scores["prompt_b"], 0.5)
+
+    def test_vote_aggregation(self):
+        ctx = self._context_with_ensemble_scores({
+            "prompt_a": {"ModelA": 0.9, "ModelB": 0.1, "ModelC": 0.4, "ModelD": 0.2},
+            "prompt_b": {"ModelA": 0.8, "ModelB": 0.95, "ModelC": 0.7, "ModelD": 0.3},
+            "prompt_c": {"ModelA": 0.2, "ModelB": 0.4, "ModelC": 0.6, "ModelD": 0.9},
+        })
+        stage = EnsembleScoringStage(strategy="vote")
+        ctx = stage.run(ctx)
+
+        self.assertAlmostEqual(ctx.scores["prompt_a"], 0.25)
+        self.assertAlmostEqual(ctx.scores["prompt_b"], 0.5)
+        self.assertAlmostEqual(ctx.scores["prompt_c"], 0.25)
+
     def test_best_prompt_updated_by_ensemble_scoring(self):
         ctx = self._context_with_ensemble_scores({
             "prompt_low":  {"ModelA": 0.2, "ModelB": 0.2},
@@ -94,7 +118,7 @@ class EnsembleScoringStageTests(unittest.TestCase):
 
     def test_invalid_strategy_raises(self):
         with self.assertRaises(ValueError):
-            EnsembleScoringStage(strategy="median")  # type: ignore
+            EnsembleScoringStage(strategy="bogus")  # type: ignore
 
     def test_selection_does_not_overwrite_global_best(self):
         from pipeline.prompt_evolution.stages.selection import SelectionStage
@@ -178,6 +202,12 @@ class EnsembleExecutionStageTests(unittest.TestCase):
         for pid, model_scores in ctx.ensemble_scores.items():
             self.assertIn("ModelA", model_scores)
             self.assertIn("ModelB", model_scores)
+
+        self.assertIn("ModelA", ctx.eval_results_by_model)
+        self.assertIn("ModelB", ctx.eval_results_by_model)
+        for model_name, results in ctx.eval_results_by_model.items():
+            for eval_result in results.values():
+                self.assertEqual(eval_result.evaluator_model, model_name)
 
     def test_candidate_count_equals_num_models_times_mutations(self):
         ctx = _make_context()

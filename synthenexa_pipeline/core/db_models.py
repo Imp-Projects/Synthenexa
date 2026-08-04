@@ -122,11 +122,16 @@ class Evaluation(Base):
     prompt_id: Mapped[str] = mapped_column(String(50), nullable=False)
     experiment_id: Mapped[int] = mapped_column(ForeignKey("experiments.id"), nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    evaluator_model: Mapped[Optional[str]] = mapped_column(String(255))
     passed: Mapped[int] = mapped_column(Integer, nullable=False)
     failed: Mapped[int] = mapped_column(Integer, nullable=False)
     total: Mapped[int] = mapped_column(Integer, nullable=False)
     syntax_errors: Mapped[int] = mapped_column(Integer, default=0)
     errors: Mapped[Optional[list]] = mapped_column(JSON)
+    total_time_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    min_time_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    max_time_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    avg_time_ms: Mapped[float] = mapped_column(Float, default=0.0)
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
 
     # Relationships
@@ -135,6 +140,7 @@ class Evaluation(Base):
     __table_args__ = (
         Index("idx_evaluations_prompt_generation", "prompt_id", "generation"),
         Index("idx_evaluations_experiment", "experiment_id"),
+        Index("idx_evaluations_experiment_model", "experiment_id", "evaluator_model"),
     )
 
 
@@ -163,6 +169,9 @@ class Snapshot(Base):
     best_prompt_text: Mapped[Optional[str]] = mapped_column(Text)
     scores: Mapped[Optional[dict]] = mapped_column(JSON)
     reward_history: Mapped[Optional[dict]] = mapped_column(JSON)
+    best_ensemble_scores: Mapped[Optional[dict]] = mapped_column(JSON)
+    model_leaderboard: Mapped[Optional[dict]] = mapped_column(JSON)
+    ensemble_scores: Mapped[Optional[dict]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
 
     # Relationships

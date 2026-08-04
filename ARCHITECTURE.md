@@ -147,7 +147,7 @@ The pipeline executes a strict Directed Acyclic Graph (DAG) of stages during eac
 `EnsembleExecutionStage (Part 2)` & `EvaluationStage`: Every prompt in the master pool is tested on **every** model in the ensemble. Each model uses all 15 prompts to generate code for every benchmark task, which is then run through EvalPlus. This creates a dense score matrix (e.g., 15 prompts × 3 models).
 
 **Phase 3 — Scoring & Selection**
-`EnsembleScoringStage`: Aggregates each prompt's per-model scores into a single combined reward using a configurable strategy (`mean`, `min`, or `max`). The default `mean` strategy ensures the selected prompt must perform **consistently well across all models**, not just over-index on one.
+`EnsembleScoringStage`: Aggregates each prompt's per-model scores into a single combined reward using a configurable strategy (`mean`, `min`, `median`, `max`, or `vote`). The default `mean` strategy ensures the selected prompt must perform **consistently well across all models**, not just over-index on one. `median` is useful when one model is noisy, `vote` is a ranking-based consensus strategy that counts how many models ranked the prompt first, and `min` remains the strictest robustness check.
 `SelectionStage`: Applies the active policy (e.g., greedy) to pick the highest-scoring universal prompt as the next seed.
 
 This cross-testing approach prevents prompt overfitting to a single model and mathematically guarantees that the winning prompt has been battle-tested across multiple LLM architectures.
@@ -165,13 +165,13 @@ The `pipeline/policies/` package follows a simple strategy pattern. Both `Greedy
 
 ### 3.7 Results Web UI
 
-A lightweight FastAPI application (`synthenexa_pipeline/api.py`) serves a browser-based dashboard for viewing experiment results. After running the pipeline, start the web server:
+A lightweight FastAPI application (`synthenexa_pipeline/api.py`) serves a browser-based dashboard for visual analysis of experiment results. It reads the canonical experiment artifact store, distills the latest run into a small summary, and renders a curated set of charts that show score progression, winning prompts, and prompt-pool trends. After running the pipeline, start the web server:
 
 ```bash
 uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-The dashboard reads from `experiments/artifacts/` and renders results via `templates/index.html` at `http://localhost:8000`. This provides a faster way to inspect experiment outputs compared to browsing the filesystem directly.
+The dashboard reads from `experiments/artifacts/` and renders results via `templates/index.html` at `http://localhost:8000`. This keeps the UI grounded in the real experiment outputs while still presenting them as a concise, presentation-friendly analysis layer rather than a raw artifact browser.
 
 ---
 
@@ -194,6 +194,18 @@ The `.devcontainer/` directory provides a fully automated, reproducible setup us
 | Ollama bridge | `host.docker.internal:22000` routes to an Ollama process on the developer's host machine |
 | Editor config | Ruff formatter (format-on-save), Pylance, debugpy all pre-installed |
 | Consistency | Every developer gets the same environment regardless of host OS |
+
+### Ensemble strategy requirements
+
+The ensemble stage needs at least 2 models because each prompt is cross-evaluated across the model set. Strategy-specific guidance:
+
+- `mean`: Best general-purpose default. Use when you want a smooth signal from all model scores.
+- `min`: Best for strict robustness checks. Use when a prompt must not fail badly on any model.
+- `median`: Best when one model may be an outlier. Works best when there are at least 3 model scores per prompt.
+- `max`: Best for exploratory runs or specialist prompts. It can hide weaknesses because it only reflects the strongest model.
+- `vote`: Best when you want a ranking-based consensus signal. Each model votes for its highest-scoring candidate prompt, and the score is the fraction of model votes received. It is most meaningful when you have several prompt variations so models can make a real choice, and it works best with 3 or more models.
+
+As a practical lower bound, the ensemble is usable with 2 models and 1 or more mutations, but `vote` becomes much more informative once the run includes multiple mutations per model and a broader prompt pool.
 
 ### Container architecture
 

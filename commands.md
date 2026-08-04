@@ -70,6 +70,6 @@ python synthenexa_pipeline/scripts/run_optimization.py --model gemini:gemini-2.0
 ### Common flag combinations
 - `--generations <N>` – Number of generations per model.
 - `--mutations <N>` – Number of prompt mutations per generation.
-- `--ensemble-strategy mean|min|max` – How ensemble outputs are aggregated.
+- `--ensemble-strategy mean|min|median|max|vote` – How ensemble outputs are aggregated.
 - `--dataset <path>` – Specify a custom dataset.
 - `--experiment <name>` – Tag the run for tracking.
