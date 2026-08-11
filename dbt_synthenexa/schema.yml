@@ -1,0 +1,23 @@
+version: 2
+
+models:
+  - name: dim_prompt
+    columns:
+      - name: prompt_id
+        tests: [not_null, unique]
+  - name: dim_model
+    columns:
+      - name: model_name
+        tests: [not_null, unique]
+  - name: fact_evaluation
+    columns:
+      - name: experiment_id
+        tests: [not_null]
+      - name: prompt_id
+        tests: [not_null]
+  - name: fact_generation_summary
+    columns:
+      - name: experiment_id
+        tests: [not_null]
+      - name: generation
+        tests: [not_null]

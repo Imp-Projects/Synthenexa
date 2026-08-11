@@ -1,0 +1,14 @@
+synthenexa:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: ../synthenexa_pipeline/experiments/warehouse.duckdb
+      threads: 4
+      extensions:
+        - sqlite
+      attach:
+        - path: ../synthenexa_pipeline/experiments/synthenexa.db
+          type: sqlite
+          alias: sqlite_source
+          read_only: true
