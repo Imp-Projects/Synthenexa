@@ -7,11 +7,17 @@ This is the heart of the system. It:
        mutation → execution → evaluation → scoring → selection
   3. Tracks the reward history and persists per-generation snapshots.
 """
-from typing import List, Optional
+from contextlib import nullcontext
+from typing import List
 
 from core.context import PipelineContext
-from pipeline.prompt_evolution.stages.base import Stage
 from pipeline.prompt_evolution.policies.base import Policy
+from pipeline.prompt_evolution.stages.base import Stage
+
+try:
+    from observability import get_pipeline_metrics
+except Exception:  # pragma: no cover - keeps the workflow backward compatible
+    get_pipeline_metrics = None
 
 
 class PromptEvolutionWorkflow:
@@ -35,14 +41,11 @@ class PromptEvolutionWorkflow:
         tracker=None,
     ):
         self.context = context
-        self.stages  = stages
-        self.policy  = policy
+        self.stages = stages
+        self.policy = policy
         self.storage = storage
         self.tracker = tracker
-
-    # ---------------------------------------------------------------- #
-    #  Public entry point                                               #
-    # ---------------------------------------------------------------- #
+        self.metrics = get_pipeline_metrics() if get_pipeline_metrics else None
 
     def run(self, generations: int) -> PipelineContext:
         """
@@ -53,121 +56,112 @@ class PromptEvolutionWorkflow:
         ctx = self.context
         ctx.max_generations = generations
 
-        # -------------------------------------------------------------
-        #  Gen-0: Evaluate the base prompt to establish a baseline
-        # -------------------------------------------------------------
-        if ctx.base_prompt is not None:
-            ctx.generation = 0
-            print(f"\n{'='*60}")
-            print(f"  Generation 0 / {generations} (Baseline Evaluation)")
-            print(f"{'='*60}\n")
-            
-            # Setup Gen-0 state: candidate is just the base prompt
-            ctx.candidate_prompts = [ctx.base_prompt]
-            
-            # Run only Execution, Evaluation, and Scoring (skip Mutation & Selection)
-            # Find the index of ExecutionStage (or EnsembleExecutionStage)
-            start_idx = 0
-            for i, stage in enumerate(self.stages):
-                if "Execution" in stage.__class__.__name__:
-                    start_idx = i
-                    break
-            
-            # Run the evaluation/scoring pipeline for Gen-0
-            for stage in self.stages[start_idx:]:
-                # We skip SelectionStage in Gen-0 so it doesn't try to pick the "best" mutant
-                if "Selection" not in stage.__class__.__name__:
-                    ctx = stage.run(ctx)
-            
-            # The base prompt is intrinsically the best prompt for Gen-0
-            ctx.best_prompt = ctx.base_prompt
-            # EnsembleScoringStage populates ctx.scores
-            ctx.best_score = ctx.scores.get(ctx.base_prompt.id, 0.0)
-            ctx.best_ensemble_scores = ctx.eval_results_by_model if hasattr(ctx, "eval_results_by_model") else {}
+        try:
+            if ctx.base_prompt is not None:
+                baseline_scope = self.metrics.track_generation() if self.metrics else nullcontext()
+                with baseline_scope:
+                    ctx.generation = 0
+                    print(f"\n{'=' * 60}")
+                    print(f"  Generation 0 / {generations} (Baseline Evaluation)")
+                    print(f"{'=' * 60}\n")
 
-            ctx.reward_history[0] = ctx.best_score
+                    ctx.candidate_prompts = [ctx.base_prompt]
 
-            if self.storage:
-                self.storage.save_generation_snapshot(ctx, 0)
-                self.storage.save_prompts(ctx.candidate_prompts, 0)
-                eval_list = []
-                if ctx.eval_results_by_model:
-                    for model_results in ctx.eval_results_by_model.values():
-                        eval_list.extend(model_results.values())
-                else:
-                    eval_list = list(ctx.eval_results.values())
-                if eval_list:
-                    self.storage.save_evaluations(eval_list, 0)
+                    start_idx = 0
+                    for i, stage in enumerate(self.stages):
+                        if "Execution" in stage.__class__.__name__:
+                            start_idx = i
+                            break
 
-            if self.tracker:
-                self.tracker.log_generation(
-                    generation=0,
-                    avg_reward=ctx.best_score,
-                    best_prompt=ctx.best_prompt,
-                    stats={"scores": ctx.scores, "best_score": ctx.best_score},
-                )
-            
-            ctx.reset_for_next_generation()
+                    for stage in self.stages[start_idx:]:
+                        if "Selection" not in stage.__class__.__name__:
+                            ctx = self._run_stage(stage, ctx)
 
-        # Seed current_prompt from base_prompt for Gen-1 mutations
-        if ctx.current_prompt is None and ctx.base_prompt is not None:
-            ctx.current_prompt = ctx.base_prompt
+                    ctx.best_prompt = ctx.base_prompt
+                    ctx.best_score = ctx.scores.get(ctx.base_prompt.id, 0.0)
+                    ctx.best_ensemble_scores = (
+                        ctx.eval_results_by_model if hasattr(ctx, "eval_results_by_model") else {}
+                    )
+                    ctx.reward_history[0] = ctx.best_score
+                    self._record_best_score(ctx)
 
-        for gen in range(1, generations + 1):
-            ctx.generation = gen
-            print(f"\n{'='*60}")
-            print(f"  Generation {gen} / {generations}")
-            print(f"{'='*60}\n")
-            
-            if ctx.current_prompt:
-                print("Parent Prompt:")
-                print(f"  Source Model: {ctx.current_prompt.origin_model or 'base'}")
-                if ctx.current_prompt.id in ctx.scores:
-                    print(f"  Previous Score: {ctx.scores[ctx.current_prompt.id]:.4f}")
-                print("\nEvolving from:")
-                print(f"  {ctx.current_prompt.text[:120]!r}...")
-                print("-" * 60 + "\n")
+                    if self.storage:
+                        self.storage.save_generation_snapshot(ctx, 0)
+                        self.storage.save_prompts(ctx.candidate_prompts, 0)
+                        eval_list = []
+                        if ctx.eval_results_by_model:
+                            for model_results in ctx.eval_results_by_model.values():
+                                eval_list.extend(model_results.values())
+                        else:
+                            eval_list = list(ctx.eval_results.values())
+                        if eval_list:
+                            self.storage.save_evaluations(eval_list, 0)
 
-            ctx = self.run_generation(ctx)
+                    if self.tracker:
+                        self.tracker.log_generation(
+                            generation=0,
+                            avg_reward=ctx.best_score,
+                            best_prompt=ctx.best_prompt,
+                            stats={"scores": ctx.scores, "best_score": ctx.best_score},
+                        )
 
-            # Record this generation's best score in the reward history
-            ctx.reward_history[gen] = ctx.best_score
+                    ctx.reset_for_next_generation()
 
-            # Persist snapshot if storage is wired up
-            if self.storage:
-                self.storage.save_generation_snapshot(ctx, gen)
-                self.storage.save_prompts(ctx.candidate_prompts, gen)
-                eval_list = []
-                if ctx.eval_results_by_model:
-                    for model_results in ctx.eval_results_by_model.values():
-                        eval_list.extend(model_results.values())
-                else:
-                    eval_list = list(ctx.eval_results.values())
-                if eval_list:
-                    self.storage.save_evaluations(eval_list, gen)
+            if ctx.current_prompt is None and ctx.base_prompt is not None:
+                ctx.current_prompt = ctx.base_prompt
 
-            # Log to tracker if wired up
-            if self.tracker and ctx.best_prompt:
-                avg_reward = (
-                    sum(ctx.scores.values()) / len(ctx.scores)
-                    if ctx.scores else 0.0
-                )
-                self.tracker.log_generation(
-                    generation=gen,
-                    avg_reward=avg_reward,
-                    best_prompt=ctx.best_prompt,
-                    stats={"scores": ctx.scores, "best_score": ctx.best_score},
-                )
+            for gen in range(1, generations + 1):
+                generation_scope = self.metrics.track_generation() if self.metrics else nullcontext()
+                with generation_scope:
+                    ctx.generation = gen
+                    print(f"\n{'=' * 60}")
+                    print(f"  Generation {gen} / {generations}")
+                    print(f"{'=' * 60}\n")
 
-            # Reset ephemeral per-generation state; keep best + history
-            ctx.reset_for_next_generation()
+                    if ctx.current_prompt:
+                        print("Parent Prompt:")
+                        print(f"  Source Model: {ctx.current_prompt.origin_model or 'base'}")
+                        if ctx.current_prompt.id in ctx.scores:
+                            print(f"  Previous Score: {ctx.scores[ctx.current_prompt.id]:.4f}")
+                        print("\nEvolving from:")
+                        print(f"  {ctx.current_prompt.text[:120]!r}...")
+                        print("-" * 60 + "\n")
 
-        self.context = ctx
-        return ctx
+                    ctx = self.run_generation(ctx)
+                    ctx.reward_history[gen] = ctx.best_score
+                    self._record_best_score(ctx)
 
-    # ---------------------------------------------------------------- #
-    #  Single-generation execution                                      #
-    # ---------------------------------------------------------------- #
+                    if self.storage:
+                        self.storage.save_generation_snapshot(ctx, gen)
+                        self.storage.save_prompts(ctx.candidate_prompts, gen)
+                        eval_list = []
+                        if ctx.eval_results_by_model:
+                            for model_results in ctx.eval_results_by_model.values():
+                                eval_list.extend(model_results.values())
+                        else:
+                            eval_list = list(ctx.eval_results.values())
+                        if eval_list:
+                            self.storage.save_evaluations(eval_list, gen)
+
+                    if self.tracker and ctx.best_prompt:
+                        avg_reward = sum(ctx.scores.values()) / len(ctx.scores) if ctx.scores else 0.0
+                        self.tracker.log_generation(
+                            generation=gen,
+                            avg_reward=avg_reward,
+                            best_prompt=ctx.best_prompt,
+                            stats={"scores": ctx.scores, "best_score": ctx.best_score},
+                        )
+
+                    ctx.reset_for_next_generation()
+
+            self.context = ctx
+            if self.metrics:
+                self.metrics.record_run("success")
+            return ctx
+        except Exception:
+            if self.metrics:
+                self.metrics.record_run("failed")
+            raise
 
     def run_generation(self, context: PipelineContext) -> PipelineContext:
         """
@@ -175,5 +169,20 @@ class PromptEvolutionWorkflow:
         threading context through as the shared state carrier.
         """
         for stage in self.stages:
-            context = stage.run(context)
+            context = self._run_stage(stage, context)
         return context
+
+    def _run_stage(self, stage: Stage, context: PipelineContext) -> PipelineContext:
+        stage_scope = self.metrics.track_stage(stage.__class__.__name__) if self.metrics else nullcontext()
+        with stage_scope:
+            return stage.run(context)
+
+    def _record_best_score(self, context: PipelineContext) -> None:
+        if not self.metrics:
+            return
+        model_name = None
+        if context.best_prompt is not None:
+            model_name = context.best_prompt.origin_model
+        if not model_name:
+            model_name = getattr(context, "model_name", None)
+        self.metrics.record_best_score(model_name, context.best_score)
