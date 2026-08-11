@@ -1,0 +1,38 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    command: sleep infinity
+    environment:
+      PYTHONPATH: /workspaces/Synthenexa/synthenexa_pipeline
+      PYTHONDONTWRITEBYTECODE: "1"
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - .:/workspaces/Synthenexa
+
+  airflow:
+    image: apache/airflow:2.9.3-python3.11
+    working_dir: /opt/synthenexa
+    command: standalone
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      PYTHONPATH: /opt/synthenexa/synthenexa_pipeline
+    ports:
+      - "8080:8080"
+    volumes:
+      - .:/opt/synthenexa
+
+  streamlit:
+    image: python:3.11-slim
+    working_dir: /app
+    command: >
+      bash -lc "pip install --no-cache-dir -r requirements.txt &&
+      streamlit run synthenexa_pipeline/dashboard/app.py --server.port 8501 --server.address 0.0.0.0"
+    ports:
+      - "8501:8501"
+    volumes:
+      - .:/app
