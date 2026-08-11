@@ -1,0 +1,13 @@
+services:
+  airflow:
+    image: apache/airflow:2.9.3-python3.11
+    working_dir: /opt/synthenexa
+    command: standalone
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      PYTHONPATH: /opt/synthenexa/synthenexa_pipeline
+    ports:
+      - "8080:8080"
+    volumes:
+      - ..:/opt/synthenexa
