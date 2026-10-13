@@ -8,12 +8,13 @@ Normalizes experiment data from either:
 This keeps analysis and visualization code focused on metrics instead of
 backend-specific storage details.
 """
+
 from __future__ import annotations
 
 import json
 import os
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -31,6 +32,7 @@ class ExperimentResult:
     snapshots: list[dict[str, Any]]
     prompts: list[dict[str, Any]]
     evaluations: list[dict[str, Any]]
+    final_test_evaluations: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _safe_json_loads(value: Any, default: Any) -> Any:
@@ -127,20 +129,21 @@ class ResultsRepository:
             prompts = [
                 dict(row)
                 for row in con.execute(
-                    "SELECT prompt_id, generation, text, is_base, is_best, created_at "
-                    "FROM prompts WHERE experiment_id = ? ORDER BY generation, id",
+                    "SELECT * FROM prompts WHERE experiment_id = ? ORDER BY generation, id",
                     (exp_id,),
                 ).fetchall()
             ]
             evaluations = [
                 dict(row)
                 for row in con.execute(
-                    "SELECT prompt_id, generation, evaluator_model, passed, failed, total, "
-                    "syntax_errors, errors, total_time_ms, min_time_ms, max_time_ms, avg_time_ms, created_at "
-                    "FROM evaluations WHERE experiment_id = ? ORDER BY generation, id",
+                    "SELECT * FROM evaluations WHERE experiment_id = ? ORDER BY generation, id",
                     (exp_id,),
                 ).fetchall()
             ]
+            final_test_evaluations = [
+                row for row in evaluations if row.get("dataset_split") == "test" or row.get("generation") == -1
+            ]
+            evaluations = [row for row in evaluations if row not in final_test_evaluations]
             snapshots = []
             for row in con.execute(
                 "SELECT * FROM snapshots WHERE experiment_id = ? ORDER BY generation, id",
@@ -162,7 +165,9 @@ class ResultsRepository:
             best_prompt = {
                 "run_id": exp["run_id"],
                 "model": exp["model_name"],
-                "prompt_id": best_prompt_row.get("prompt_id") if best_prompt_row else last_snapshot.get("best_prompt_id"),
+                "prompt_id": best_prompt_row.get("prompt_id")
+                if best_prompt_row
+                else last_snapshot.get("best_prompt_id"),
                 "text": best_prompt_row.get("text") if best_prompt_row else last_snapshot.get("best_prompt_text", ""),
                 "score": last_snapshot.get("best_score", 0.0),
                 "reward_history": last_snapshot.get("reward_history", {}),
@@ -185,6 +190,13 @@ class ResultsRepository:
                         "errors": _safe_json_loads(row.get("errors"), []),
                     }
                     for row in evaluations
+                ],
+                final_test_evaluations=[
+                    {
+                        **row,
+                        "errors": _safe_json_loads(row.get("errors"), []),
+                    }
+                    for row in final_test_evaluations
                 ],
             )
         finally:
@@ -223,16 +235,14 @@ class ResultsRepository:
         if run_id and best_prompt and best_prompt.get("run_id") != run_id:
             return None
 
-        snapshots = [
-            self._read_json(path)
-            for path in sorted(target_dir.glob("snapshot_gen_*.json"))
-        ]
+        snapshots = [self._read_json(path) for path in sorted(target_dir.glob("snapshot_gen_*.json"))]
         prompts = []
         evaluations = []
         for path in sorted(target_dir.glob("prompts_gen_*.jsonl")):
             prompts.extend(self._read_jsonl(path))
         for path in sorted(target_dir.glob("evaluations_gen_*.jsonl")):
             evaluations.extend(self._read_jsonl(path))
+        final_test_evaluations = self._read_jsonl(target_dir / "final_test_evaluations.jsonl")
 
         model_name = best_prompt.get("model", "ensemble")
         if isinstance(best_prompt.get("ensemble_models"), list):
@@ -251,6 +261,7 @@ class ResultsRepository:
             snapshots=snapshots,
             prompts=prompts,
             evaluations=evaluations,
+            final_test_evaluations=final_test_evaluations,
         )
 
     def _list_sqlite_experiments(self) -> list[dict[str, Any]]:
