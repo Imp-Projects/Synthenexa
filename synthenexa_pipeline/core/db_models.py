@@ -8,16 +8,17 @@ Defines database schema for:
   - snapshots: Generation state snapshots
   - run_logs: Append-only run logs
 """
+
 from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     Float,
     ForeignKey,
     Index,
     Integer,
-    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -30,7 +31,7 @@ from core.config import Base
 class Experiment(Base):
     """
     Stores experiment metadata and run information.
-    
+
     Attributes:
         id: Primary key
         run_id: Unique identifier for the pipeline run
@@ -42,6 +43,7 @@ class Experiment(Base):
         config: Experiment configuration as JSONB
         status: Current status of the experiment (running, completed, failed)
     """
+
     __tablename__ = "experiments"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -50,7 +52,9 @@ class Experiment(Base):
     model_name: Mapped[str] = mapped_column(String(255), nullable=False)
     base_prompt_id: Mapped[Optional[str]] = mapped_column(String(50))
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc))
-    updated_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
+    )
     config: Mapped[Optional[dict]] = mapped_column(JSON)
     status: Mapped[str] = mapped_column(String(50), default="running")
 
@@ -60,15 +64,13 @@ class Experiment(Base):
     snapshots: Mapped[list["Snapshot"]] = relationship(back_populates="experiment", cascade="all, delete-orphan")
     run_logs: Mapped[list["RunLog"]] = relationship(back_populates="experiment", cascade="all, delete-orphan")
 
-    __table_args__ = (
-        Index("idx_experiments_created_at", "created_at"),
-    )
+    __table_args__ = (Index("idx_experiments_created_at", "created_at"),)
 
 
 class Prompt(Base):
     """
     Stores prompt candidates across generations.
-    
+
     Attributes:
         id: Primary key
         prompt_id: Unique identifier for the prompt
@@ -79,6 +81,7 @@ class Prompt(Base):
         is_best: Whether this is the best performing prompt
         created_at: Timestamp when prompt was created
     """
+
     __tablename__ = "prompts"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -103,7 +106,7 @@ class Prompt(Base):
 class Evaluation(Base):
     """
     Stores evaluation results for prompts.
-    
+
     Attributes:
         id: Primary key
         prompt_id: ID of the prompt being evaluated
@@ -116,6 +119,7 @@ class Evaluation(Base):
         errors: Detailed error information as JSONB
         created_at: Timestamp when evaluation was created
     """
+
     __tablename__ = "evaluations"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -123,6 +127,9 @@ class Evaluation(Base):
     experiment_id: Mapped[int] = mapped_column(ForeignKey("experiments.id"), nullable=False)
     generation: Mapped[int] = mapped_column(Integer, nullable=False)
     evaluator_model: Mapped[Optional[str]] = mapped_column(String(255))
+    is_base: Mapped[bool] = mapped_column(Boolean, default=False)
+    dataset_split: Mapped[str] = mapped_column(String(50), default="all")
+    task_ids: Mapped[Optional[list]] = mapped_column(JSON)
     passed: Mapped[int] = mapped_column(Integer, nullable=False)
     failed: Mapped[int] = mapped_column(Integer, nullable=False)
     total: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -147,7 +154,7 @@ class Evaluation(Base):
 class Snapshot(Base):
     """
     Stores generation state snapshots.
-    
+
     Attributes:
         id: Primary key
         experiment_id: Foreign key to experiments table
@@ -159,6 +166,7 @@ class Snapshot(Base):
         reward_history: Reward history across generations as JSONB
         created_at: Timestamp when snapshot was created
     """
+
     __tablename__ = "snapshots"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -186,13 +194,14 @@ class Snapshot(Base):
 class RunLog(Base):
     """
     Stores append-only run logs.
-    
+
     Attributes:
         id: Primary key
         experiment_id: Foreign key to experiments table
         log_entry: Log entry data as JSONB
         created_at: Timestamp when log was created
     """
+
     __tablename__ = "run_logs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -203,6 +212,4 @@ class RunLog(Base):
     # Relationships
     experiment: Mapped["Experiment"] = relationship(back_populates="run_logs")
 
-    __table_args__ = (
-        Index("idx_run_logs_experiment", "experiment_id"),
-    )
+    __table_args__ = (Index("idx_run_logs_experiment", "experiment_id"),)
