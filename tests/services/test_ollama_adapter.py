@@ -22,8 +22,10 @@ class OllamaAdapterTests(unittest.TestCase):
             "def add(a, b):\n    return a + b",
         )
 
+    @patch("services.llm.ollama_adapter.requests.get")
     @patch("services.llm.ollama_adapter.requests.post")
-    def test_generate_formats_chat_payload(self, post):
+    def test_generate_formats_chat_payload(self, post, get):
+        get.side_effect = Exception("offline")
         response = Mock()
         response.json.return_value = {"message": {"content": "hello"}}
         response.raise_for_status.return_value = None
@@ -50,9 +52,11 @@ class OllamaAdapterTests(unittest.TestCase):
         self.assertEqual(payload["options"]["temperature"], 0.2)
         self.assertEqual(timeout, 12)
 
+    @patch("services.llm.ollama_adapter.requests.get")
     @patch("services.llm.ollama_adapter.time.sleep")
     @patch("services.llm.ollama_adapter.requests.post")
-    def test_generate_retries_failed_requests(self, post, sleep):
+    def test_generate_retries_failed_requests(self, post, sleep, get):
+        get.side_effect = Exception("offline")
         response = Mock()
         response.json.return_value = {"message": {"content": "ok"}}
         response.raise_for_status.return_value = None
