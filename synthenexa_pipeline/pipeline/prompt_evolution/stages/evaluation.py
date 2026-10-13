@@ -7,10 +7,12 @@ For each prompt candidate:
   - Calls EvalService.evaluate() which runs the MBPP check(candidate) harness
   - Stores a rich EvalResult (with syntax_errors count) in context.eval_results
 """
+
 from core.context import PipelineContext
 from core.schema import EvalResult
-from pipeline.prompt_evolution.stages.base import Stage
 from services.eval_service import EvalService
+
+from pipeline.prompt_evolution.stages.base import Stage
 
 
 class EvaluationStage(Stage):
@@ -22,6 +24,7 @@ class EvaluationStage(Stage):
     def run(self, context: PipelineContext) -> PipelineContext:
         print(f"[EvaluationStage] Evaluating {len(context.generated_codes)} prompt candidates...")
         context.eval_results = {}
+        context.task_outcomes = {}
 
         # Build a task lookup: task_id → task dict (for ordered matching)
         task_by_id = {t["task_id"]: t for t in context.tasks}
@@ -47,8 +50,13 @@ class EvaluationStage(Stage):
                 min_time_ms=summary.get("min_time_ms", 0.0),
                 max_time_ms=summary.get("max_time_ms", 0.0),
                 avg_time_ms=summary.get("avg_time_ms", 0.0),
+                evaluator_model=getattr(context, "model_name", "") if context.model_name != "ensemble" else "",
+                is_base=any(candidate.id == prompt_id and candidate.is_base for candidate in context.candidate_prompts),
+                dataset_split=getattr(context, "dataset_split", "all"),
+                task_ids=[task.get("task_id", "unknown") for task in tasks],
             )
             context.eval_results[prompt_id] = result
+            context.task_outcomes[prompt_id] = summary.get("task_outcomes", [])
 
             # Log error details for visibility
             score_pct = (summary["passed"] / summary["total"] * 100) if summary["total"] else 0
