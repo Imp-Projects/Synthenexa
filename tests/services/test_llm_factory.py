@@ -1,6 +1,8 @@
 import os
 import sys
+import sys
 import unittest
+from unittest.mock import patch
 
 # Try importing project modules; if not found, add pipeline path to sys.path and retry.
 try:
@@ -13,20 +15,25 @@ except ImportError:
     PIPELINE = os.path.join(ROOT, "synthenexa_pipeline")
     if PIPELINE not in sys.path:
         sys.path.insert(0, PIPELINE)
+    from services.llm.cloud_adapter import CloudAdapter
     from services.llm.factory import LLMFactory
     from services.llm.ollama_adapter import OllamaAdapter
     from services.llm.registry import ModelRegistry, ModelSpec
 
 
 class LLMFactoryTests(unittest.TestCase):
-    def test_factory_returns_cloud_adapter_for_cloud_model(self):
+    @patch("services.llm.ollama_adapter.requests.get")
+    def test_factory_returns_cloud_adapter_for_cloud_model(self, get):
+        get.side_effect = Exception("offline")
         adapter = LLMFactory().create(model="ollama:nemotron-3-super:cloud", base_url="http://example.test")
 
         self.assertIsInstance(adapter, CloudAdapter)
         self.assertEqual(adapter.model, "nemotron-3-super:cloud")
         self.assertEqual(adapter.base_url, "http://example.test")
 
-    def test_factory_routes_cloud_models_to_cloud_adapter(self):
+    @patch("services.llm.ollama_adapter.requests.get")
+    def test_factory_routes_cloud_models_to_cloud_adapter(self, get):
+        get.side_effect = Exception("offline")
         adapter = LLMFactory().create(model="nemotron-3-super:cloud", base_url="http://example.test")
 
         self.assertIsInstance(adapter, CloudAdapter)
@@ -47,11 +54,9 @@ class LLMFactoryTests(unittest.TestCase):
         names = registry.names()
 
         self.assertIn("nemotron-3-super:cloud", names)
-        self.assertIn("qwen2.5:3b", names)
-        self.assertIn("cogito:3b", names)
-        self.assertIn("qwen:latest", names)
-        self.assertIn("gemma4:latest", names)
-        self.assertNotIn("phi3:mini", names)
+        self.assertIn("qwen3-coder-next:cloud", names)
+        self.assertIn("gpt-oss:120b-cloud", names)
+        self.assertIn("qwen3-coder:480b-cloud", names)
 
     def test_registry_allows_custom_model_names(self):
         spec = ModelRegistry().get("custom-local:1b")
