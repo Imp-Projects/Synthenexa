@@ -30,8 +30,16 @@ ollama.log
 
 # Experiments artifacts and local databases
 synthenexa_pipeline/experiments/
+synthenexa.db
+
+# dbt-generated state
+dbt_synthenexa/.user.yml
+dbt_synthenexa/logs/
+dbt_synthenexa/target/
 
 # Analysis outputs
 synthenexa_pipeline/Analysis/output/
 
 docs/
+!docs/
+!docs/prompt_refinement_implementation_checklist.md
