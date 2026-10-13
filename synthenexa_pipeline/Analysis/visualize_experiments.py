@@ -34,47 +34,56 @@ from typing import Optional
 # ── Graceful import check ────────────────────────────────────────────────────
 try:
     import matplotlib
+
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
-    from matplotlib.patches import Patch
+    import matplotlib.pyplot as plt
     import matplotlib.ticker as mticker
+    from matplotlib.patches import Patch
 except ImportError:
     sys.exit("[ERROR] matplotlib is required. Run: pip install matplotlib seaborn")
 
 try:
     import seaborn as sns
+    from Analysis.compare_baseline import build_test_comparison
 except ImportError:
-    sys.exit("[ERROR] seaborn is required. Run: pip install matplotlib seaborn")
+    sns = None
+    from Analysis.compare_baseline import build_test_comparison
 
 # ── Constants ────────────────────────────────────────────────────────────────
-_HERE       = Path(__file__).parent
-_PIPELINE   = _HERE.parent
+_HERE = Path(__file__).parent
+_PIPELINE = _HERE.parent
 _DEFAULT_DB = _PIPELINE / "experiments" / "synthenexa.db"
 _OUTPUT_DIR = _HERE / "output"
 
 PALETTE = {
-    "primary":   "#6C63FF",
+    "primary": "#6C63FF",
     "secondary": "#F7931E",
-    "accent":    "#00C9A7",
-    "danger":    "#FF6B6B",
-    "neutral":   "#8E8EA0",
-    "bg":        "#1A1A2E",
-    "surface":   "#16213E",
-    "text":      "#E0E0E0",
+    "accent": "#00C9A7",
+    "danger": "#FF6B6B",
+    "neutral": "#8E8EA0",
+    "bg": "#1A1A2E",
+    "surface": "#16213E",
+    "text": "#E0E0E0",
 }
 
 MODEL_COLORS = [
-    "#6C63FF", "#F7931E", "#00C9A7", "#FF6B6B",
-    "#A855F7", "#3B82F6", "#F59E0B", "#10B981",
+    "#6C63FF",
+    "#F7931E",
+    "#00C9A7",
+    "#FF6B6B",
+    "#A855F7",
+    "#3B82F6",
+    "#F59E0B",
+    "#10B981",
 ]
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+
 def _connect(db_path: Path) -> sqlite3.Connection:
     if not db_path.exists():
-        sys.exit(f"[ERROR] Database not found at: {db_path}\n"
-                 "Run the pipeline with --storage sqlite first.")
+        sys.exit(f"[ERROR] Database not found at: {db_path}\nRun the pipeline with --storage sqlite first.")
     return sqlite3.connect(db_path)
 
 
@@ -94,11 +103,11 @@ def _pick_experiment(con: sqlite3.Connection, experiment_id: Optional[int]) -> d
     if not row:
         sys.exit("[ERROR] No completed experiment found in the database.")
     return {
-        "id":              row[0],
-        "run_id":          row[1],
+        "id": row[0],
+        "run_id": row[1],
         "experiment_name": row[2],
-        "model_name":      row[3],
-        "config":          json.loads(row[4]) if row[4] else {},
+        "model_name": row[3],
+        "config": json.loads(row[4]) if row[4] else {},
     }
 
 
@@ -128,6 +137,7 @@ def _apply_dark_style(fig, axes_list):
 #  Plot functions
 # ═══════════════════════════════════════════════════════════════════════════
 
+
 def plot_score_distribution(ax, scores: dict):
     """
     Plot 1 — Prompt Score Distribution
@@ -142,17 +152,22 @@ def plot_score_distribution(ax, scores: dict):
     bars = ax.barh(labels, values, color=bar_colors, edgecolor="#2D2D4E", linewidth=0.6, height=0.6)
 
     for bar, val in zip(bars, values):
-        ax.text(val + 0.005, bar.get_y() + bar.get_height() / 2,
-                f"{val:.2%}", va="center", ha="left",
-                color=PALETTE["text"], fontsize=8.5, fontweight="bold")
+        ax.text(
+            val + 0.005,
+            bar.get_y() + bar.get_height() / 2,
+            f"{val:.2%}",
+            va="center",
+            ha="left",
+            color=PALETTE["text"],
+            fontsize=8.5,
+            fontweight="bold",
+        )
 
     ax.set_xlim(0, 1.18)
     ax.set_xlabel("Ensemble Score (Mean Pass Rate Across All Models)", fontsize=9)
     ax.set_title("① Prompt Ensemble Score Distribution", fontsize=11, fontweight="bold", pad=10)
-    ax.axvline(mean_v, color=PALETTE["secondary"], linestyle="--", linewidth=1.2,
-               label=f"Mean: {mean_v:.2%}")
-    ax.legend(fontsize=8, labelcolor=PALETTE["text"], facecolor=PALETTE["surface"],
-              edgecolor="#2D2D4E")
+    ax.axvline(mean_v, color=PALETTE["secondary"], linestyle="--", linewidth=1.2, label=f"Mean: {mean_v:.2%}")
+    ax.legend(fontsize=8, labelcolor=PALETTE["text"], facecolor=PALETTE["surface"], edgecolor="#2D2D4E")
     ax.invert_yaxis()
 
 
@@ -163,6 +178,7 @@ def plot_model_heatmap(ax, eval_rows: list, prompt_ids: list, model_names: list)
     Answers: Does the winning prompt work well on ALL models?
     """
     import collections
+
     data = collections.defaultdict(dict)
     for row in eval_rows:
         pid, _, _, passed, failed, total, _, model = row
@@ -176,18 +192,28 @@ def plot_model_heatmap(ax, eval_rows: list, prompt_ids: list, model_names: list)
 
     cmap = sns.color_palette("YlOrRd", as_cmap=True)
     hm = sns.heatmap(
-        matrix, ax=ax,
-        xticklabels=short_models, yticklabels=ylabels,
-        cmap=cmap, vmin=0, vmax=1,
-        annot=True, fmt=".0%",
-        linewidths=0.4, linecolor="#2D2D4E",
+        matrix,
+        ax=ax,
+        xticklabels=short_models,
+        yticklabels=ylabels,
+        cmap=cmap,
+        vmin=0,
+        vmax=1,
+        annot=True,
+        fmt=".0%",
+        linewidths=0.4,
+        linecolor="#2D2D4E",
         annot_kws={"size": 8, "color": "#1A1A2E", "fontweight": "bold"},
         cbar_kws={"label": "Pass Rate", "shrink": 0.8},
     )
     hm.collections[0].colorbar.ax.yaxis.label.set_color(PALETTE["text"])
     hm.collections[0].colorbar.ax.tick_params(colors=PALETTE["text"])
-    ax.set_title("② Cross-Model Evaluation Heatmap\n(High values across all columns = generalises well)",
-                 fontsize=11, fontweight="bold", pad=10)
+    ax.set_title(
+        "② Cross-Model Evaluation Heatmap\n(High values across all columns = generalises well)",
+        fontsize=11,
+        fontweight="bold",
+        pad=10,
+    )
     ax.set_xlabel("Evaluator Model", fontsize=9)
     ax.set_ylabel("Prompt Variant", fontsize=9)
     ax.tick_params(axis="x", rotation=15)
@@ -202,10 +228,18 @@ def plot_generalization_scatter(ax, eval_rows: list, prompt_ids: list, model_nam
     Answers: Does the best prompt sit at the top-right (best on both)?
     """
     import collections
+
     if len(model_names) < 2:
-        ax.text(0.5, 0.5, "Requires ≥2 models\nin the ensemble",
-                ha="center", va="center", color=PALETTE["neutral"],
-                transform=ax.transAxes, fontsize=11)
+        ax.text(
+            0.5,
+            0.5,
+            "Requires ≥2 models\nin the ensemble",
+            ha="center",
+            va="center",
+            color=PALETTE["neutral"],
+            transform=ax.transAxes,
+            fontsize=11,
+        )
         ax.set_title("③ Cross-Model Generalisation Scatter", fontsize=11, fontweight="bold", pad=10)
         return
 
@@ -222,22 +256,28 @@ def plot_generalization_scatter(ax, eval_rows: list, prompt_ids: list, model_nam
         colors.append(PALETTE["accent"] if pid == best_pid else PALETTE["primary"])
 
     ax.scatter(xs, ys, c=colors, s=130, edgecolors="#2D2D4E", linewidth=0.8, zorder=3)
-    ax.plot([0, 1], [0, 1], "--", color=PALETTE["neutral"], linewidth=1.0,
-            label="Perfect generalisation", zorder=2)
+    ax.plot([0, 1], [0, 1], "--", color=PALETTE["neutral"], linewidth=1.0, label="Perfect generalisation", zorder=2)
 
     for pid, x, y, c in zip(prompt_ids, xs, ys, colors):
         if c == PALETTE["accent"]:
-            ax.annotate("★ Winner", (x, y), textcoords="offset points", xytext=(6, 4),
-                        fontsize=8, color=PALETTE["accent"], fontweight="bold")
+            ax.annotate(
+                "★ Winner",
+                (x, y),
+                textcoords="offset points",
+                xytext=(6, 4),
+                fontsize=8,
+                color=PALETTE["accent"],
+                fontweight="bold",
+            )
 
     ax.set_xlim(-0.05, 1.1)
     ax.set_ylim(-0.05, 1.1)
     ax.set_xlabel(_model_label(m0) + " Score", fontsize=9)
     ax.set_ylabel(_model_label(m1) + " Score", fontsize=9)
-    ax.set_title("③ Cross-Model Generalisation\n(Top-right corner = best on both models)",
-                 fontsize=11, fontweight="bold", pad=10)
-    ax.legend(fontsize=8, labelcolor=PALETTE["text"], facecolor=PALETTE["surface"],
-              edgecolor="#2D2D4E")
+    ax.set_title(
+        "③ Cross-Model Generalisation\n(Top-right corner = best on both models)", fontsize=11, fontweight="bold", pad=10
+    )
+    ax.legend(fontsize=8, labelcolor=PALETTE["text"], facecolor=PALETTE["surface"], edgecolor="#2D2D4E")
 
 
 def plot_leaderboard(ax, scores: dict, best_pid: str):
@@ -248,8 +288,8 @@ def plot_leaderboard(ax, scores: dict, best_pid: str):
     """
     sorted_items = sorted(scores.items(), key=lambda kv: kv[1])
     raw_pids = [k for k, _ in sorted_items]
-    labels   = [_short_prompt(k) for k in raw_pids]
-    values   = [v for _, v in sorted_items]
+    labels = [_short_prompt(k) for k in raw_pids]
+    values = [v for _, v in sorted_items]
 
     def _get_model_part(pid):
         parts = pid.split("_")
@@ -264,18 +304,30 @@ def plot_leaderboard(ax, scores: dict, best_pid: str):
 
     bars = ax.barh(labels, values, color=bar_colors, edgecolor="#2D2D4E", linewidth=0.5, height=0.55)
     for bar, val, pid in zip(bars, values, raw_pids):
-        ax.text(val + 0.005, bar.get_y() + bar.get_height() / 2,
-                f"{val:.2%}", va="center", ha="left", color=PALETTE["text"], fontsize=8,
-                fontweight="bold" if pid == best_pid else "normal")
+        ax.text(
+            val + 0.005,
+            bar.get_y() + bar.get_height() / 2,
+            f"{val:.2%}",
+            va="center",
+            ha="left",
+            color=PALETTE["text"],
+            fontsize=8,
+            fontweight="bold" if pid == best_pid else "normal",
+        )
 
     handles = [Patch(facecolor=color_map[m], label=_model_label(m)) for m in unique_models]
     handles.append(Patch(facecolor=PALETTE["accent"], label="Winner"))
-    ax.legend(handles=handles, fontsize=7.5, labelcolor=PALETTE["text"],
-              facecolor=PALETTE["surface"], edgecolor="#2D2D4E", loc="lower right")
+    ax.legend(
+        handles=handles,
+        fontsize=7.5,
+        labelcolor=PALETTE["text"],
+        facecolor=PALETTE["surface"],
+        edgecolor="#2D2D4E",
+        loc="lower right",
+    )
     ax.set_xlim(0, 1.18)
     ax.set_xlabel("Ensemble Score", fontsize=9)
-    ax.set_title("④ Ensemble Leaderboard — Prompt Rankings by Origin Model",
-                 fontsize=11, fontweight="bold", pad=10)
+    ax.set_title("④ Ensemble Leaderboard — Prompt Rankings by Origin Model", fontsize=11, fontweight="bold", pad=10)
     ax.invert_yaxis()
 
 
@@ -286,6 +338,7 @@ def plot_pass_fail_breakdown(ax, eval_rows: list, prompt_ids: list):
     Answers: Why do some prompts score lower? (runtime errors vs syntax errors)
     """
     import collections
+
     data = collections.defaultdict(lambda: {"passed": 0, "failed": 0, "syntax": 0})
     for row in eval_rows:
         pid, _, _, passed, failed, total, syntax_err, _ = row
@@ -293,23 +346,33 @@ def plot_pass_fail_breakdown(ax, eval_rows: list, prompt_ids: list):
         data[pid]["failed"] += max(0, failed - syntax_err)
         data[pid]["syntax"] += syntax_err
 
-    labels  = [_short_prompt(p) for p in prompt_ids]
-    passed  = [data[p]["passed"] for p in prompt_ids]
-    failed  = [data[p]["failed"] for p in prompt_ids]
-    syntax  = [data[p]["syntax"] for p in prompt_ids]
+    labels = [_short_prompt(p) for p in prompt_ids]
+    passed = [data[p]["passed"] for p in prompt_ids]
+    failed = [data[p]["failed"] for p in prompt_ids]
+    syntax = [data[p]["syntax"] for p in prompt_ids]
     x = range(len(labels))
 
-    ax.bar(x, passed, label="Passed",       color=PALETTE["accent"],    edgecolor="#2D2D4E", lw=0.5)
-    ax.bar(x, failed, label="Failed",       color=PALETTE["danger"],    edgecolor="#2D2D4E", lw=0.5,
-           bottom=passed)
-    ax.bar(x, syntax, label="Syntax Error", color=PALETTE["secondary"], edgecolor="#2D2D4E", lw=0.5,
-           bottom=[p + f for p, f in zip(passed, failed)])
+    ax.bar(x, passed, label="Passed", color=PALETTE["accent"], edgecolor="#2D2D4E", lw=0.5)
+    ax.bar(x, failed, label="Failed", color=PALETTE["danger"], edgecolor="#2D2D4E", lw=0.5, bottom=passed)
+    ax.bar(
+        x,
+        syntax,
+        label="Syntax Error",
+        color=PALETTE["secondary"],
+        edgecolor="#2D2D4E",
+        lw=0.5,
+        bottom=[p + f for p, f in zip(passed, failed)],
+    )
 
     ax.set_xticks(list(x))
     ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=7.5)
     ax.set_ylabel("Test Cases (summed across all evaluator models)", fontsize=9)
-    ax.set_title("⑤ Pass / Fail Breakdown per Prompt\n(Why do lower-ranked prompts fail?)",
-                 fontsize=11, fontweight="bold", pad=10)
+    ax.set_title(
+        "⑤ Pass / Fail Breakdown per Prompt\n(Why do lower-ranked prompts fail?)",
+        fontsize=11,
+        fontweight="bold",
+        pad=10,
+    )
     ax.legend(fontsize=8, labelcolor=PALETTE["text"], facecolor=PALETTE["surface"], edgecolor="#2D2D4E")
 
 
@@ -320,38 +383,109 @@ def plot_generation_evolution(ax, snapshots: list):
     This is the PRIMARY proof that the system actively refines prompts.
     """
     if not snapshots:
-        ax.text(0.5, 0.5, "No snapshot data available",
-                ha="center", va="center", color=PALETTE["neutral"], transform=ax.transAxes)
+        ax.text(
+            0.5,
+            0.5,
+            "No snapshot data available",
+            ha="center",
+            va="center",
+            color=PALETTE["neutral"],
+            transform=ax.transAxes,
+        )
         ax.set_title("⑥ Prompt Evolution Over Generations", fontsize=11, fontweight="bold", pad=10)
         return
 
-    gens   = [row[0] for row in snapshots]
+    gens = [row[0] for row in snapshots]
     scores = [row[1] for row in snapshots]
 
-    ax.plot(gens, scores, color=PALETTE["primary"], linewidth=2.5, marker="o",
-            markersize=9, markerfacecolor=PALETTE["accent"], markeredgecolor="#2D2D4E",
-            markeredgewidth=1.2, zorder=3)
+    ax.plot(
+        gens,
+        scores,
+        color=PALETTE["primary"],
+        linewidth=2.5,
+        marker="o",
+        markersize=9,
+        markerfacecolor=PALETTE["accent"],
+        markeredgecolor="#2D2D4E",
+        markeredgewidth=1.2,
+        zorder=3,
+    )
     ax.fill_between(gens, scores, alpha=0.12, color=PALETTE["primary"])
 
-    best_sc  = max(scores)
+    best_sc = max(scores)
     best_gen = gens[scores.index(best_sc)]
-    ax.annotate(f"Peak: {best_sc:.2%}", xy=(best_gen, best_sc),
-                xytext=(best_gen + 0.1, best_sc + 0.02),
-                arrowprops=dict(arrowstyle="->", color=PALETTE["accent"], lw=1.2),
-                color=PALETTE["accent"], fontsize=9, fontweight="bold")
+    ax.annotate(
+        f"Peak: {best_sc:.2%}",
+        xy=(best_gen, best_sc),
+        xytext=(best_gen + 0.1, best_sc + 0.02),
+        arrowprops=dict(arrowstyle="->", color=PALETTE["accent"], lw=1.2),
+        color=PALETTE["accent"],
+        fontsize=9,
+        fontweight="bold",
+    )
 
     ax.set_xlabel("Generation", fontsize=9)
     ax.set_ylabel("Best Ensemble Score", fontsize=9)
     ax.set_ylim(0, 1.08)
     ax.xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
-    ax.set_title("⑥ Prompt Evolution Over Generations\n(Rising line = system is improving prompts)",
-                 fontsize=11, fontweight="bold", pad=10)
+    ax.set_title(
+        "⑥ Prompt Evolution Over Generations\n(Rising line = system is improving prompts)",
+        fontsize=11,
+        fontweight="bold",
+        pad=10,
+    )
     ax.grid(axis="y", linestyle="--", alpha=0.25, color=PALETTE["neutral"])
+
+
+def plot_held_out_base_vs_refined(comparison: dict, output_path: Path) -> Optional[Path]:
+    """Save the strict held-out base-vs-refined comparison chart."""
+    rows = comparison.get("models", [])
+    if not rows:
+        return None
+    fig, ax = plt.subplots(figsize=(10, 6))
+    fig.patch.set_facecolor(PALETTE["bg"])
+    ax.set_facecolor(PALETTE["surface"])
+    positions = list(range(len(rows)))
+    width = 0.36
+    ax.bar(
+        [p - width / 2 for p in positions],
+        [row["base_score"] for row in rows],
+        width,
+        label="Original base prompt",
+        color=PALETTE["secondary"],
+    )
+    ax.bar(
+        [p + width / 2 for p in positions],
+        [row["refined_score"] for row in rows],
+        width,
+        label="Refined prompt",
+        color=PALETTE["accent"],
+    )
+    ax.set_xticks(positions)
+    ax.set_xticklabels([_model_label(row["model"]) for row in rows], rotation=20, ha="right")
+    ax.set_ylim(0, 1.12)
+    ax.set_ylabel("Held-Out Test Pass Rate", color=PALETTE["text"])
+    ax.set_title("Held-Out Test: Original vs Refined Prompt", color=PALETTE["text"], fontweight="bold")
+    ax.legend(facecolor=PALETTE["surface"], labelcolor=PALETTE["text"])
+    for position, row in zip(positions, rows):
+        ax.text(
+            position + width / 2,
+            row["refined_score"] + 0.02,
+            f"{row['absolute_delta']:+.1%}",
+            ha="center",
+            color=PALETTE["text"],
+            fontweight="bold",
+        )
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight", facecolor=PALETTE["bg"])
+    plt.close(fig)
+    return output_path
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Orchestrator
 # ═══════════════════════════════════════════════════════════════════════════
+
 
 def generate_report(db_path: Path, experiment_id: Optional[int] = None):
     con = _connect(db_path)
@@ -361,8 +495,7 @@ def generate_report(db_path: Path, experiment_id: Optional[int] = None):
     eid = exp["id"]
     cfg = exp["config"]
     model_names: list = cfg.get("ensemble_models", [])
-    print(f"[Info] Visualising experiment #{eid}: '{exp['experiment_name']}' "
-          f"(run_id={exp['run_id']})")
+    print(f"[Info] Visualising experiment #{eid}: '{exp['experiment_name']}' (run_id={exp['run_id']})")
     print(f"[Info] Ensemble models: {model_names}")
 
     # Snapshots
@@ -375,16 +508,14 @@ def generate_report(db_path: Path, experiment_id: Optional[int] = None):
     snapshots = [(r[0], r[1], r[2]) for r in snap_rows]
 
     scores_json = {}
-    best_pid    = None
+    best_pid = None
     if snap_rows:
         last = snap_rows[-1]
-        best_pid    = last[2]
+        best_pid = last[2]
         scores_json = json.loads(last[3]) if last[3] else {}
 
     # Prompts
-    cur.execute(
-        "SELECT prompt_id FROM prompts WHERE experiment_id = ? ORDER BY id", (eid,)
-    )
+    cur.execute("SELECT prompt_id FROM prompts WHERE experiment_id = ? ORDER BY id", (eid,))
     prompt_ids = [r[0] for r in cur.fetchall()]
     if not prompt_ids:
         sys.exit("[ERROR] No prompt rows found for this experiment.")
@@ -405,10 +536,16 @@ def generate_report(db_path: Path, experiment_id: Optional[int] = None):
                 return m
         return candidates[0] if candidates else "unknown"
 
-    eval_rows = [
-        (r[0], r[1], r[2], r[3], r[4], r[5], r[6], _infer_model(r[0], model_names))
-        for r in raw_evals
-    ]
+    eval_rows = [(r[0], r[1], r[2], r[3], r[4], r[5], r[6], _infer_model(r[0], model_names)) for r in raw_evals]
+    cur.execute("PRAGMA table_info(evaluations)")
+    eval_columns = {row[1] for row in cur.fetchall()}
+    final_test_rows = []
+    if {"is_base", "dataset_split"}.issubset(eval_columns):
+        cur.execute("SELECT * FROM evaluations WHERE experiment_id = ? AND dataset_split = 'test' ORDER BY id", (eid,))
+        final_test_rows = [
+            dict(zip([column[1] for column in cur.execute("PRAGMA table_info(evaluations)").fetchall()], row))
+            for row in cur.fetchall()
+        ]
     con.close()
 
     # ── Layout ────────────────────────────────────────────────────────────
@@ -416,8 +553,7 @@ def generate_report(db_path: Path, experiment_id: Optional[int] = None):
     fig = plt.figure(figsize=(20, 22))
     fig.patch.set_facecolor(PALETTE["bg"])
 
-    gs = gridspec.GridSpec(3, 2, figure=fig, hspace=0.50, wspace=0.38,
-                           top=0.93, bottom=0.05, left=0.07, right=0.97)
+    gs = gridspec.GridSpec(3, 2, figure=fig, hspace=0.50, wspace=0.38, top=0.93, bottom=0.05, left=0.07, right=0.97)
     ax1 = fig.add_subplot(gs[0, 0])
     ax2 = fig.add_subplot(gs[0, 1])
     ax3 = fig.add_subplot(gs[1, 0])
@@ -429,7 +565,10 @@ def generate_report(db_path: Path, experiment_id: Optional[int] = None):
     fig.suptitle(
         f"Synthenexa — Prompt Evolution Analysis\n"
         f"Experiment: {exp['experiment_name']}  |  Run: {exp['run_id']}  |  Models: {model_str}",
-        fontsize=13, fontweight="bold", color=PALETTE["text"], y=0.97,
+        fontsize=13,
+        fontweight="bold",
+        color=PALETTE["text"],
+        y=0.97,
     )
 
     plot_score_distribution(ax1, scores_json)
@@ -445,16 +584,21 @@ def generate_report(db_path: Path, experiment_id: Optional[int] = None):
     out_path = _OUTPUT_DIR / f"experiment_{exp['run_id']}_report.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight", facecolor=PALETTE["bg"])
     print(f"[✓] Dashboard saved → {out_path}")
+    if final_test_rows:
+        try:
+            comparison = build_test_comparison(final_test_rows, best_pid or "")
+            held_out_path = _OUTPUT_DIR / f"experiment_{exp['run_id']}_held_out_base_vs_refined.png"
+            plot_held_out_base_vs_refined(comparison, held_out_path)
+            print(f"[✓] Held-out comparison saved → {held_out_path}")
+        except ValueError as exc:
+            print(f"[WARN] Held-out comparison incomplete: {exc}")
     return out_path
 
 
 def _list_experiments(db_path: Path):
     con = _connect(db_path)
     cur = con.cursor()
-    cur.execute(
-        "SELECT id, run_id, experiment_name, model_name, status, created_at "
-        "FROM experiments ORDER BY id DESC"
-    )
+    cur.execute("SELECT id, run_id, experiment_name, model_name, status, created_at FROM experiments ORDER BY id DESC")
     rows = cur.fetchall()
     con.close()
     if not rows:
@@ -470,12 +614,18 @@ def main():
     parser = argparse.ArgumentParser(
         description="Generate Synthenexa experiment visualizations from the SQLite database."
     )
-    parser.add_argument("--db", type=Path, default=_DEFAULT_DB,
-                        help=f"Path to SQLite database (default: {_DEFAULT_DB})")
-    parser.add_argument("--experiment-id", type=int, default=None,
-                        help="Specific experiment ID to visualise (default: latest completed).")
-    parser.add_argument("--list-experiments", action="store_true",
-                        help="List all experiments in the database and exit.")
+    parser.add_argument(
+        "--db", type=Path, default=_DEFAULT_DB, help=f"Path to SQLite database (default: {_DEFAULT_DB})"
+    )
+    parser.add_argument(
+        "--experiment-id",
+        type=int,
+        default=None,
+        help="Specific experiment ID to visualise (default: latest completed).",
+    )
+    parser.add_argument(
+        "--list-experiments", action="store_true", help="List all experiments in the database and exit."
+    )
     args = parser.parse_args()
 
     if args.list_experiments:
