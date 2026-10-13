@@ -12,6 +12,7 @@ Usage:
     python Analysis/generate_analysis.py --experiment realistic_run
     python Analysis/generate_analysis.py --run-id c302c699 --source sqlite
 """
+
 from __future__ import annotations
 
 import argparse
@@ -37,6 +38,7 @@ _PIPELINE = _HERE.parent
 if str(_PIPELINE) not in sys.path:
     sys.path.insert(0, str(_PIPELINE))
 
+from Analysis.compare_baseline import build_test_comparison
 from services.results_repository import default_repository
 
 
@@ -153,6 +155,7 @@ def _normalize_experiment(result) -> dict[str, Any]:
 
     models = sorted({model for row in prompt_rows for model in row["model_scores"]})
     reward_history = result.best_prompt.get("reward_history", {})
+    final_test_rows = list(getattr(result, "final_test_evaluations", []))
     return {
         "run_id": result.run_id,
         "experiment_name": result.experiment_name,
@@ -164,6 +167,7 @@ def _normalize_experiment(result) -> dict[str, Any]:
         "generation_rows": generation_rows,
         "reward_history": reward_history,
         "models": models,
+        "final_test_evaluations": final_test_rows,
     }
 
 
@@ -212,6 +216,15 @@ def _build_metrics(data: dict[str, Any]) -> dict[str, Any]:
         strongest_model = max(row["model_scores"].items(), key=lambda item: item[1])[0]
         model_wins[strongest_model] += 1
 
+    try:
+        test_comparison = build_test_comparison(
+            data["final_test_evaluations"], data["best_prompt"].get("prompt_id", "")
+        )
+        comparison_status = "complete"
+    except ValueError as exc:
+        test_comparison = {"complete": False, "error": str(exc)}
+        comparison_status = "incomplete"
+
     return {
         "final_best_score": data["best_prompt"].get("score", final_best),
         "generation_best_start": first_best,
@@ -224,7 +237,50 @@ def _build_metrics(data: dict[str, Any]) -> dict[str, Any]:
         "average_top_prompt_floor": mean([row["min_model_score"] for row in top_prompts]) if top_prompts else 0.0,
         "origin_model_top10_counts": dict(origin_counter),
         "model_specific_win_counts": dict(model_wins),
+        "held_out_comparison_status": comparison_status,
+        "held_out_comparison": test_comparison,
+        "baseline_test_score": test_comparison.get("base_mean"),
+        "refined_test_score": test_comparison.get("refined_mean"),
+        "held_out_improvement": test_comparison.get("absolute_delta"),
+        "model_score_spread": test_comparison.get("delta_stddev"),
+        "train_test_gap": (
+            test_comparison.get("refined_mean") - data["best_prompt"].get("score", 0.0)
+            if test_comparison.get("refined_mean") is not None
+            else None
+        ),
     }
+
+
+def _plot_base_vs_refined(comparison: dict[str, Any], output_path: Path) -> None:
+    rows = comparison.get("models", [])
+    if not rows:
+        return
+    labels = [row["model"] for row in rows]
+    base = [row["base_score"] for row in rows]
+    refined = [row["refined_score"] for row in rows]
+    positions = list(range(len(rows)))
+    width = 0.36
+    fig, ax = plt.subplots(figsize=(10, 5))
+    _apply_aesthetics(ax, "Held-Out Test: Original vs Refined Prompt", ylabel="Pass Rate")
+    ax.bar([p - width / 2 for p in positions], base, width=width, label="Base prompt", color="#F7931E")
+    ax.bar([p + width / 2 for p in positions], refined, width=width, label="Refined prompt", color="#00C9A7")
+    for position, row in zip(positions, rows):
+        ax.text(
+            position + width / 2,
+            row["refined_score"] + 0.02,
+            f"{row['absolute_delta']:+.1%}",
+            ha="center",
+            fontsize=9,
+            fontweight="bold",
+            color="#333333",
+        )
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.set_ylim(0, 1.12)
+    ax.legend(frameon=False)
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=180, facecolor="#FAFAFA", bbox_inches="tight")
+    plt.close(fig)
 
 
 def _apply_aesthetics(ax, title, xlabel=None, ylabel=None):
@@ -245,7 +301,7 @@ def _apply_aesthetics(ax, title, xlabel=None, ylabel=None):
 def _plot_error_topology(prompt_rows: list[dict[str, Any]], output_path: Path) -> None:
     rows = list(reversed(prompt_rows[:10]))
     labels = [_prompt_label(row["prompt_id"]) for row in rows]
-    
+
     pass_pcts, fail_pcts, syntax_pcts = [], [], []
     for row in rows:
         passed = sum(stat.get("passed", 0) for stat in row["eval_stats"])
@@ -253,7 +309,7 @@ def _plot_error_topology(prompt_rows: list[dict[str, Any]], output_path: Path) -
         syntax = sum(stat.get("syntax_errors", 0) for stat in row["eval_stats"])
         failed = sum(stat.get("failed", 0) for stat in row["eval_stats"])
         logic_and_runtime = max(0, failed - syntax)
-        
+
         if total == 0:
             pass_pcts.append(0)
             fail_pcts.append(0)
@@ -265,12 +321,12 @@ def _plot_error_topology(prompt_rows: list[dict[str, Any]], output_path: Path) -
 
     fig, ax = plt.subplots(figsize=(10, 6))
     _apply_aesthetics(ax, "Error Topology Breakdown (Top 10 Prompts)", xlabel="Percentage (%)")
-    
+
     ax.barh(labels, pass_pcts, color="#10B981", label="Pass", height=0.6)
     ax.barh(labels, fail_pcts, left=pass_pcts, color="#F43F5E", label="Logic/Runtime Fail", height=0.6)
     left_syntax = [p + f for p, f in zip(pass_pcts, fail_pcts)]
     ax.barh(labels, syntax_pcts, left=left_syntax, color="#F59E0B", label="Syntax Error", height=0.6)
-    
+
     ax.grid(axis="x", color="#EAEAEA", linestyle="-", linewidth=0.8, alpha=0.7)
     ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.15), ncol=3, frameon=False, fontsize=9, labelcolor="#555555")
     ax.set_xlim(0, 100)
@@ -283,7 +339,7 @@ def _plot_execution_time(prompt_rows: list[dict[str, Any]], output_path: Path) -
     rows = prompt_rows[:10]
     fig, ax = plt.subplots(figsize=(10, 6))
     _apply_aesthetics(ax, "Execution Time Performance", ylabel="Average Time (ms)")
-    
+
     labels = []
     has_data = False
     for i, row in enumerate(rows):
@@ -292,10 +348,10 @@ def _plot_execution_time(prompt_rows: list[dict[str, Any]], output_path: Path) -
             continue
         has_data = True
         labels.append(_prompt_label(row["prompt_id"]))
-        
+
         x_vals = [i + 1] * len(times)
         ax.scatter(x_vals, times, color="#6366F1", alpha=0.6, s=60, edgecolors="white", linewidth=0.5, zorder=2)
-        
+
         mean_time = sum(times) / len(times)
         ax.hlines(mean_time, i + 0.7, i + 1.3, color="#312E81", linewidth=3, zorder=3)
 
@@ -314,20 +370,20 @@ def _plot_execution_time(prompt_rows: list[dict[str, Any]], output_path: Path) -
 def _plot_cross_model_robustness(prompt_rows: list[dict[str, Any]], models: list[str], output_path: Path) -> None:
     if len(models) < 2:
         return
-        
+
     rows = list(reversed(prompt_rows[:10]))
     labels = [_prompt_label(row["prompt_id"]) for row in rows]
-    
+
     fig, ax = plt.subplots(figsize=(10, 6))
     _apply_aesthetics(ax, "Cross-Model Robustness (Score Spread)", xlabel="Pass Rate")
-    
+
     model_a, model_b = models[0], models[1]
-    
+
     for i, row in enumerate(rows):
         scores = row["model_scores"]
         score_a = scores.get(model_a, 0)
         score_b = scores.get(model_b, 0)
-        
+
         ax.plot([score_a, score_b], [i, i], color="#CBD5E1", linewidth=2, zorder=1)
         ax.scatter([score_a], [i], color="#3B82F6", s=80, zorder=2, label=_short_model_name(model_a) if i == 0 else "")
         ax.scatter([score_b], [i], color="#F59E0B", s=80, zorder=2, label=_short_model_name(model_b) if i == 0 else "")
@@ -345,19 +401,30 @@ def _plot_cross_model_robustness(prompt_rows: list[dict[str, Any]], models: list
 def _plot_reward_progression(generation_rows: list[dict[str, Any]], output_path: Path) -> None:
     fig, ax = plt.subplots(figsize=(10, 5))
     _apply_aesthetics(ax, "Reward Progression Over Generations", xlabel="Generation", ylabel="Best Score")
-    
+
     gens = [row["generation"] for row in generation_rows]
     best_scores = [row["best_score"] for row in generation_rows]
-    
-    ax.plot(gens, best_scores, color="#0EA5E9", linewidth=3, marker="o", markersize=8, markerfacecolor="white", markeredgewidth=2, zorder=3)
+
+    ax.plot(
+        gens,
+        best_scores,
+        color="#0EA5E9",
+        linewidth=3,
+        marker="o",
+        markersize=8,
+        markerfacecolor="white",
+        markeredgewidth=2,
+        zorder=3,
+    )
     ax.fill_between(gens, best_scores, 0, color="#0EA5E9", alpha=0.1, zorder=2)
-    
+
     ax.set_ylim(0, 1.05)
     ax.grid(axis="y", color="#EAEAEA", linestyle="-", linewidth=0.8, alpha=0.7)
-    
+
     from matplotlib.ticker import MaxNLocator
+
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-    
+
     fig.tight_layout()
     fig.savefig(output_path, dpi=180, facecolor="#FAFAFA", bbox_inches="tight")
     plt.close(fig)
@@ -367,26 +434,27 @@ def _plot_model_leaderboard(metrics: dict[str, Any], output_path: Path) -> None:
     counts = metrics.get("origin_model_top10_counts", {})
     if not counts:
         return
-        
+
     sorted_models = sorted(counts.items(), key=lambda x: x[1])
     labels = [_short_model_name(k) for k, v in sorted_models]
     values = [v for k, v in sorted_models]
-    
+
     fig, ax = plt.subplots(figsize=(9, 5))
     _apply_aesthetics(ax, "Top 10 Prompts by Origin Model", xlabel="Number of Prompts")
-    
+
     for i, (label, val) in enumerate(zip(labels, values)):
         ax.plot([0, val], [i, i], color="#94A3B8", linewidth=2, zorder=1)
         ax.scatter([val], [i], color="#8B5CF6", s=120, zorder=2)
-        ax.text(val + 0.2, i, str(val), va='center', color="#555555", fontweight="bold", fontsize=10)
-        
+        ax.text(val + 0.2, i, str(val), va="center", color="#555555", fontweight="bold", fontsize=10)
+
     ax.set_yticks(range(len(labels)))
     ax.set_yticklabels(labels)
     ax.set_xlim(0, max(values) + 1.5)
-    
+
     from matplotlib.ticker import MaxNLocator
+
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-    
+
     fig.tight_layout()
     fig.savefig(output_path, dpi=180, facecolor="#FAFAFA", bbox_inches="tight")
     plt.close(fig)
@@ -401,7 +469,8 @@ def _prompt_label(pid: str) -> str:
         prompt_0_gen1_m1_..._gen4_m0_nemotron_3_super_cloud      -> G4-M0 (nemotron-3-super)
     """
     import re
-    segments = re.findall(r'gen(\d+)_m(\d+)_([^_](?:[^g]|g(?!en\d))*)', pid)
+
+    segments = re.findall(r"gen(\d+)_m(\d+)_([^_](?:[^g]|g(?!en\d))*)", pid)
     if not segments:
         return pid.replace("prompt_0_", "").replace("_cloud", "")[:22]
     gen_num, mut_idx, model_part = segments[-1]
@@ -468,14 +537,21 @@ def main() -> None:
 
     if data["generation_rows"]:
         _plot_reward_progression(data["generation_rows"], dirs["overview"] / "reward_progression.png")
-    
+
     if data["prompt_rows"]:
         _plot_error_topology(data["prompt_rows"], dirs["prompt_wise"] / "error_topology.png")
         _plot_execution_time(data["prompt_rows"], dirs["prompt_wise"] / "execution_time.png")
         _plot_model_leaderboard(metrics, dirs["model_wise"] / "model_leaderboard.png")
-    
+
     if data["models"] and data["prompt_rows"]:
-        _plot_cross_model_robustness(data["prompt_rows"], data["models"], dirs["ensemble_wise"] / "cross_model_robustness.png")
+        _plot_cross_model_robustness(
+            data["prompt_rows"], data["models"], dirs["ensemble_wise"] / "cross_model_robustness.png"
+        )
+
+    if metrics["held_out_comparison_status"] == "complete":
+        _plot_base_vs_refined(metrics["held_out_comparison"], dirs["overview"] / "held_out_base_vs_refined.png")
+    else:
+        print(f"[analysis] WARNING: held-out comparison incomplete: {metrics['held_out_comparison'].get('error')}")
 
     _write_summary(data, metrics, dirs["root"] / "summary.json")
 
