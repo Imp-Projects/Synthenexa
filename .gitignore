@@ -41,5 +41,4 @@ dbt_synthenexa/target/
 synthenexa_pipeline/Analysis/output/
 
 docs/
-!docs/
-!docs/prompt_refinement_implementation_checklist.md
+
