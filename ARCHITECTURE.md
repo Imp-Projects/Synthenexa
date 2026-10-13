@@ -173,6 +173,22 @@ uvicorn api:app --host 0.0.0.0 --port 8000
 
 The dashboard reads from `experiments/artifacts/` and renders results via `templates/index.html` at `http://localhost:8000`. This keeps the UI grounded in the real experiment outputs while still presenting them as a concise, presentation-friendly analysis layer rather than a raw artifact browser.
 
+### 3.8 Evidence protocol and baseline preservation
+
+The evidence workflow separates prompt selection from final reporting:
+
+1. `DatasetService` creates deterministic, disjoint train, validation, and test partitions and records task IDs plus a source hash.
+2. Generation 0 evaluates the unchanged `prompt_0` across every ensemble model.
+3. Mutations and selection use only the train/validation task pool.
+4. After the winner is frozen, both `prompt_0` and the refined prompt are evaluated on the held-out test tasks.
+5. `StorageService` writes an immutable `manifest.json`, baseline artifacts, generation records, and separate final-test evaluations.
+6. The analysis layer refuses incomplete base/refined comparisons and reports per-model and aggregate deltas.
+
+SQLite is the queryable source for structured evidence; JSON/JSONL artifacts are
+portable exports for review and plotting. Each repeated run uses a unique run
+ID and artifact directory so baseline results cannot be overwritten by a later
+experiment.
+
 ---
 
 ## 4. Development Container
