@@ -39,11 +39,12 @@ from typing import List, Tuple
 
 from core.context import PipelineContext
 from core.reward import compute_reward
-from core.schema import PromptCandidate
+from core.schema import EvalResult, PromptCandidate
+
 from pipeline.prompt_evolution.stages.base import Stage
-from pipeline.prompt_evolution.stages.mutation import MutationStage
-from pipeline.prompt_evolution.stages.execution import ExecutionStage
 from pipeline.prompt_evolution.stages.evaluation import EvaluationStage
+from pipeline.prompt_evolution.stages.execution import ExecutionStage
+from pipeline.prompt_evolution.stages.mutation import MutationStage, prompt_hash
 
 
 class EnsembleExecutionStage(Stage):
@@ -61,24 +62,20 @@ class EnsembleExecutionStage(Stage):
         model_pipelines: List[Tuple[str, MutationStage, ExecutionStage, EvaluationStage]],
     ) -> None:
         if not model_pipelines:
-            raise ValueError(
-                "EnsembleExecutionStage requires at least one model pipeline."
-            )
+            raise ValueError("EnsembleExecutionStage requires at least one model pipeline.")
         self.model_pipelines = model_pipelines
 
     def run(self, context: PipelineContext) -> PipelineContext:
         model_names = [name for name, *_ in self.model_pipelines]
         num_models = len(self.model_pipelines)
-        print(
-            f"[EnsembleExecutionStage] Running {num_models} model pipelines: "
-            f"{', '.join(model_names)}"
-        )
+        print(f"[EnsembleExecutionStage] Running {num_models} model pipelines: {', '.join(model_names)}")
 
         # ── Reset accumulation state for this generation ──────────────────────
         context.candidate_prompts = []
         context.generated_codes = {}
         context.eval_results = {}
         context.eval_results_by_model = {}
+        context.ensemble_split_scores = {}
         context.ensemble_scores = {}
 
         # =====================================================================
@@ -92,6 +89,7 @@ class EnsembleExecutionStage(Stage):
 
         # master_candidates: uid → PromptCandidate  (globally unique IDs)
         master_candidates: dict[str, PromptCandidate] = {}
+        seen_text_hashes: set[str] = set()
 
         for model_name, mut_stage, _exec_stage, _eval_stage in self.model_pipelines:
             print(f"\n  ── Mutating with: {model_name} ──")
@@ -104,6 +102,10 @@ class EnsembleExecutionStage(Stage):
             # globally unique IDs across all models in the pool.
             safe_model = model_name.replace(":", "_").replace("-", "_")
             for c in context.candidate_prompts:
+                text_hash = prompt_hash(c.text)
+                if text_hash in seen_text_hashes:
+                    print(f"    - Skipped duplicate prompt from {model_name}: {c.id}")
+                    continue
                 uid = f"{c.id}_{safe_model}"
                 if uid not in master_candidates:
                     candidate = PromptCandidate(
@@ -113,14 +115,16 @@ class EnsembleExecutionStage(Stage):
                         generation=c.generation,
                         mutation_idx=c.mutation_idx,
                         parent_id=c.parent_id,
+                        mutation_role=c.mutation_role,
+                        prompt_hash=text_hash,
                     )
                     master_candidates[uid] = candidate
+                    seen_text_hashes.add(text_hash)
                     print(f"    + Added to pool: {uid}")
 
         total_candidates = len(master_candidates)
         print(
-            f"\n  [Phase 1 Complete] Master pool contains "
-            f"{total_candidates} unique prompts across {num_models} models."
+            f"\n  [Phase 1 Complete] Master pool contains {total_candidates} unique prompts across {num_models} models."
         )
 
         # =====================================================================
@@ -150,6 +154,13 @@ class EnsembleExecutionStage(Stage):
             # EvaluationStage: unit-test harness scores the generated code
             context = eval_stage.run(context)
 
+            missing = [candidate.id for candidate in all_candidates_list if candidate.id not in context.eval_results]
+            if missing:
+                raise RuntimeError(
+                    f"Incomplete ensemble evaluation for {model_name}; "
+                    f"missing {len(missing)} candidate result(s)."
+                )
+
             context.eval_results_by_model[model_name] = {}
 
             # Record this model's reward for every prompt in the pool
@@ -158,6 +169,33 @@ class EnsembleExecutionStage(Stage):
                 context.eval_results_by_model[model_name][uid] = eval_result
                 context.ensemble_scores.setdefault(uid, {})
                 context.ensemble_scores[uid][model_name] = compute_reward(eval_result)
+                # Derive split rewards from the same sandbox outcomes. This is
+                # deliberately local bookkeeping: no additional Ollama call.
+                outcomes = context.task_outcomes.get(uid, [])
+                by_task = {item["task_id"]: item for item in outcomes}
+                split_values: dict[str, list[bool]] = {}
+                for task in context.tasks:
+                    task_id = task.get("task_id")
+                    outcome = by_task.get(task_id)
+                    if outcome is not None:
+                        split_values.setdefault(task.get("dataset_split", "train"), []).append(
+                            bool(outcome["passed"])
+                        )
+                for split, passed_flags in split_values.items():
+                    if passed_flags:
+                        context.ensemble_split_scores.setdefault(uid, {}).setdefault(model_name, {})[
+                            split
+                        ] = sum(passed_flags) / len(passed_flags)
+
+        incomplete = {
+            candidate.id: sorted(
+                set(model_names) - set(context.ensemble_scores.get(candidate.id, {}))
+            )
+            for candidate in all_candidates_list
+            if set(context.ensemble_scores.get(candidate.id, {})) != set(model_names)
+        }
+        if incomplete:
+            raise RuntimeError(f"Incomplete ensemble score matrix: {incomplete}")
 
         # Restore the full candidate list for downstream stages
         context.candidate_prompts = all_candidates_list
@@ -169,3 +207,57 @@ class EnsembleExecutionStage(Stage):
             f"({total_candidates * num_models} total evaluation runs)."
         )
         return context
+
+    def evaluate_baseline(self, context: PipelineContext) -> PipelineContext:
+        """Evaluate the unchanged base prompt once on every ensemble model."""
+        if context.base_prompt is None:
+            raise ValueError("Cannot evaluate an ensemble baseline without a base prompt.")
+
+        baseline = context.base_prompt.model_copy(update={"id": "prompt_0", "is_base": True})
+        context.candidate_prompts = [baseline]
+        context.generated_codes = {}
+        context.eval_results = {}
+        context.eval_results_by_model = {}
+        context.baseline_eval_results_by_model = {}
+        context.ensemble_scores = {}
+
+        for model_name, _mut_stage, exec_stage, eval_stage in self.model_pipelines:
+            context.candidate_prompts = [baseline]
+            context.generated_codes = {}
+            context.eval_results = {}
+            context = exec_stage.run(context)
+            context = eval_stage.run(context)
+            result = context.eval_results.get(baseline.id)
+            if result is None:
+                raise RuntimeError(f"Baseline evaluation missing for model {model_name}.")
+            result.evaluator_model = model_name
+            result.is_base = True
+            context.eval_results_by_model[model_name] = {baseline.id: result}
+            context.baseline_eval_results_by_model[model_name] = {baseline.id: result}
+            context.ensemble_scores.setdefault(baseline.id, {})[model_name] = compute_reward(result)
+
+        context.candidate_prompts = [baseline]
+        context.eval_results = {
+            baseline.id: result
+            for model_results in context.baseline_eval_results_by_model.values()
+            for result in model_results.values()
+        }
+        return context
+
+    def evaluate_candidate(
+        self, context: PipelineContext, candidate: PromptCandidate
+    ) -> dict[str, dict[str, EvalResult]]:
+        """Evaluate one frozen candidate across all models on the current task set."""
+        results_by_model: dict[str, dict[str, EvalResult]] = {}
+        for model_name, _mut_stage, exec_stage, eval_stage in self.model_pipelines:
+            context.candidate_prompts = [candidate]
+            context.generated_codes = {}
+            context.eval_results = {}
+            context = exec_stage.run(context)
+            context = eval_stage.run(context)
+            result = context.eval_results.get(candidate.id)
+            if result is None:
+                raise RuntimeError(f"Evaluation missing for prompt {candidate.id} on model {model_name}.")
+            result.evaluator_model = model_name
+            results_by_model[model_name] = {candidate.id: result}
+        return results_by_model
