@@ -78,6 +78,6 @@ LEFT JOIN sqlite_source.evaluations AS ev
     ON ev.experiment_id = p.experiment_id
    AND ev.prompt_id = p.prompt_id
    AND ev.generation = p.generation
-GROUP BY p.prompt_id, prompt_preview, model_name
+GROUP BY 1, 2, 3
 ORDER BY pass_rate DESC NULLS LAST, prompt_id
 """
