@@ -1,12 +1,91 @@
 """
 services/dataset_service.py — Load MBPP / HumanEval benchmark datasets.
 """
+
+import hashlib
 import json
 import os
-from typing import Any, Dict, List
+import random
+from copy import deepcopy
+from typing import Any, Dict, List, Optional
 
 
 class DatasetService:
+    @staticmethod
+    def dataset_hash(tasks: List[Dict[str, Any]]) -> str:
+        """Return a stable hash for the ordered task content and IDs."""
+        payload = json.dumps(tasks, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def partition_dataset(
+        tasks: List[Dict[str, Any]],
+        seed: int = 0,
+        train_ratio: float = 0.6,
+        validation_ratio: float = 0.2,
+        test_ratio: float = 0.2,
+        train_size: Optional[int] = None,
+        validation_size: Optional[int] = None,
+        test_size: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Create deterministic, disjoint train/validation/test task partitions."""
+        if min(train_ratio, validation_ratio, test_ratio) < 0:
+            raise ValueError("Partition ratios cannot be negative.")
+        if abs(train_ratio + validation_ratio + test_ratio - 1.0) > 1e-9:
+            raise ValueError("Partition ratios must sum to 1.0.")
+        if any(size is not None and size < 0 for size in (train_size, validation_size, test_size)):
+            raise ValueError("Partition sizes cannot be negative.")
+
+        shuffled = deepcopy(tasks)
+        source_hash = DatasetService.dataset_hash(tasks)
+        random.Random(seed).shuffle(shuffled)
+        total = len(shuffled)
+        if train_size is None:
+            train_size = int(total * train_ratio)
+        if validation_size is None:
+            validation_size = int(total * validation_ratio)
+        if test_size is None:
+            test_size = total - train_size - validation_size
+        if train_size + validation_size + test_size != total:
+            raise ValueError("Partition sizes must cover the dataset exactly.")
+
+        train = shuffled[:train_size]
+        validation = shuffled[train_size : train_size + validation_size]
+        test = shuffled[train_size + validation_size :]
+        for split_name, split_tasks in (("train", train), ("validation", validation), ("test", test)):
+            for task in split_tasks:
+                task["dataset_split"] = split_name
+
+        return {
+            "train": train,
+            "validation": validation,
+            "test": test,
+            "seed": seed,
+            "dataset_hash": source_hash,
+            "task_ids": {
+                "train": [task["task_id"] for task in train],
+                "validation": [task["task_id"] for task in validation],
+                "test": [task["task_id"] for task in test],
+            },
+        }
+
+    @staticmethod
+    def load_partitions(
+        path: str,
+        seed: int = 0,
+        train_ratio: float = 0.6,
+        validation_ratio: float = 0.2,
+        test_ratio: float = 0.2,
+    ) -> Dict[str, Any]:
+        """Load a JSONL dataset and return deterministic partitions plus metadata."""
+        tasks = DatasetService.load_dataset(path)
+        return DatasetService.partition_dataset(
+            tasks,
+            seed=seed,
+            train_ratio=train_ratio,
+            validation_ratio=validation_ratio,
+            test_ratio=test_ratio,
+        )
 
     @staticmethod
     def load_dataset(path: str) -> List[Dict[str, Any]]:
@@ -35,11 +114,11 @@ class DatasetService:
                     continue
 
                 task: Dict[str, Any] = {
-                    "task_id":     raw.get("task_id", f"task_{lineno}"),
-                    "prompt":      raw.get("prompt", raw.get("text", "")),
+                    "task_id": raw.get("task_id", f"task_{lineno}"),
+                    "prompt": raw.get("prompt", raw.get("text", "")),
                     "entry_point": raw.get("entry_point", ""),
-                    "test":        raw.get("test", ""),
-                    "text":        raw.get("text", ""),
+                    "test": raw.get("test", ""),
+                    "text": raw.get("text", ""),
                     # Keep the canonical solution for reference / offline eval
                     "canonical_solution": raw.get("canonical_solution", ""),
                 }
