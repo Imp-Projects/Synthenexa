@@ -46,11 +46,18 @@ class EvalService:
         syntax_errors = 0
         errors: List[str] = []
         timings: List[float] = []
+        task_outcomes: List[Dict[str, Any]] = []
 
         for code, task in zip(generated_codes, tasks):
             result = self._sandbox.run_code_on_task(code, task)
             elapsed = result.get("elapsed_ms", 0.0)
             timings.append(elapsed)
+            task_outcomes.append({
+                "task_id": task.get("task_id", "?"),
+                "passed": bool(result["passed"]),
+                "error_category": result.get("error_category", ""),
+                "elapsed_ms": elapsed,
+            })
 
             if result["passed"]:
                 passed += 1
@@ -80,4 +87,7 @@ class EvalService:
             "min_time_ms": min_ms,
             "max_time_ms": max_ms,
             "avg_time_ms": avg_ms,
+            # Per-task outcomes let later stages calculate train/validation
+            # scores without regenerating code or making another LLM call.
+            "task_outcomes": task_outcomes,
         }
