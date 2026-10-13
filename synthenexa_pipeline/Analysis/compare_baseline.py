@@ -30,10 +30,11 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
+from statistics import mean, pstdev
 from textwrap import wrap
 from typing import Optional
 
-_HERE     = Path(__file__).parent
+_HERE = Path(__file__).parent
 _PIPELINE = _HERE.parent
 _DEFAULT_DB = _PIPELINE / "experiments" / "synthenexa.db"
 _OUTPUT_DIR = _HERE / "output"
@@ -41,10 +42,11 @@ _OUTPUT_DIR = _HERE / "output"
 # ── Import checks ─────────────────────────────────────────────────────────────
 try:
     import matplotlib
+
     matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
     import matplotlib.patches as mpatches
+    import matplotlib.pyplot as plt
     import matplotlib.ticker as mticker
 except ImportError:
     sys.exit("[ERROR] Run: pip install matplotlib seaborn")
@@ -52,25 +54,152 @@ except ImportError:
 try:
     import seaborn as sns
 except ImportError:
-    sys.exit("[ERROR] Run: pip install matplotlib seaborn")
+    sns = None
 
 # ── Colour palette ─────────────────────────────────────────────────────────────
 P = {
-    "bg":        "#1A1A2E",
-    "surface":   "#16213E",
-    "text":      "#E0E0E0",
-    "muted":     "#8E8EA0",
-    "base":      "#F7931E",   # orange  = original / base prompt
-    "winner":    "#00C9A7",   # teal    = best refined prompt
-    "variants":  "#6C63FF",   # purple  = other mutated variants
-    "danger":    "#FF6B6B",
-    "grid":      "#2D2D4E",
+    "bg": "#1A1A2E",
+    "surface": "#16213E",
+    "text": "#E0E0E0",
+    "muted": "#8E8EA0",
+    "base": "#F7931E",  # orange  = original / base prompt
+    "winner": "#00C9A7",  # teal    = best refined prompt
+    "variants": "#6C63FF",  # purple  = other mutated variants
+    "danger": "#FF6B6B",
+    "grid": "#2D2D4E",
 }
+
+
+def build_test_comparison(evaluations: list[dict], best_prompt_id: str) -> dict:
+    """Build a strict held-out base-vs-refined comparison from stored rows.
+
+    No baseline is estimated. Both prompts must have explicit test-split rows
+    for every evaluator model.
+    """
+    test_rows = [row for row in evaluations if row.get("dataset_split") == "test"]
+    base_rows = [row for row in test_rows if row.get("is_base") or row.get("prompt_id") == "prompt_0"]
+    refined_rows = [row for row in test_rows if row.get("prompt_id") == best_prompt_id and not row.get("is_base")]
+
+    base_by_model = {row.get("evaluator_model"): row for row in base_rows if row.get("evaluator_model")}
+    refined_by_model = {row.get("evaluator_model"): row for row in refined_rows if row.get("evaluator_model")}
+    models = sorted(set(base_by_model) | set(refined_by_model))
+    missing = [model for model in models if model not in base_by_model or model not in refined_by_model]
+    if not models or missing:
+        raise ValueError(
+            f"Incomplete held-out comparison; missing baseline or refined rows for: {missing or 'all models'}"
+        )
+
+    rows = []
+    for model in models:
+        base = base_by_model[model]
+        refined = refined_by_model[model]
+        base_task_ids = (
+            json.loads(base["task_ids"]) if isinstance(base.get("task_ids"), str) else base.get("task_ids", [])
+        )
+        refined_task_ids = (
+            json.loads(refined["task_ids"]) if isinstance(refined.get("task_ids"), str) else refined.get("task_ids", [])
+        )
+        if base_task_ids and refined_task_ids and set(base_task_ids) != set(refined_task_ids):
+            raise ValueError(f"Base and refined test task IDs differ for model {model}.")
+        base_rate = (base.get("passed", 0) / base.get("total", 0)) if base.get("total", 0) else 0.0
+        refined_rate = (refined.get("passed", 0) / refined.get("total", 0)) if refined.get("total", 0) else 0.0
+        delta = refined_rate - base_rate
+        rows.append(
+            {
+                "model": model,
+                "base_score": base_rate,
+                "refined_score": refined_rate,
+                "absolute_delta": delta,
+                "relative_delta": delta / base_rate if base_rate else None,
+                "task_ids": base_task_ids or refined_task_ids,
+            }
+        )
+
+    deltas = [row["absolute_delta"] for row in rows]
+    base_mean = mean(row["base_score"] for row in rows)
+    refined_mean = mean(row["refined_score"] for row in rows)
+    return {
+        "complete": True,
+        "models": rows,
+        "base_mean": base_mean,
+        "refined_mean": refined_mean,
+        "absolute_delta": refined_mean - base_mean,
+        "relative_delta": (refined_mean - base_mean) / base_mean if base_mean else None,
+        "delta_stddev": pstdev(deltas) if len(deltas) > 1 else 0.0,
+    }
+
+
+def generate_stored_comparison(db_path: Path, experiment_id: Optional[int] = None) -> tuple[Path, dict]:
+    """Generate the evidence comparison using only persisted test results."""
+    con = _connect(db_path)
+    exp = _load_experiment(con, experiment_id)
+    columns = [row[1] for row in con.execute("PRAGMA table_info(evaluations)").fetchall()]
+    if not {"is_base", "dataset_split"}.issubset(columns):
+        con.close()
+        raise ValueError("Database does not contain baseline/test provenance columns.")
+    rows = [
+        dict(zip(columns, row))
+        for row in con.execute(
+            "SELECT * FROM evaluations WHERE experiment_id = ? AND dataset_split = 'test' ORDER BY id",
+            (exp["id"],),
+        ).fetchall()
+    ]
+    snapshot = con.execute(
+        "SELECT best_prompt_id FROM snapshots WHERE experiment_id = ? ORDER BY generation DESC, id DESC LIMIT 1",
+        (exp["id"],),
+    ).fetchone()
+    con.close()
+    if not snapshot or not snapshot[0]:
+        raise ValueError("No selected prompt is stored for this experiment.")
+
+    refined_prompt_id = snapshot[0]
+    if refined_prompt_id == "prompt_0" or not any(
+        row.get("prompt_id") == refined_prompt_id and not row.get("is_base") for row in rows
+    ):
+        refined_prompt_ids = [row.get("prompt_id") for row in rows if not row.get("is_base")]
+        if not refined_prompt_ids:
+            raise ValueError("No refined prompt test result is stored for this experiment.")
+        refined_prompt_id = refined_prompt_ids[0]
+
+    comparison = build_test_comparison(rows, refined_prompt_id)
+    _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = _OUTPUT_DIR / f"comparison_{exp['run_id']}_held_out.png"
+    fig, ax = plt.subplots(figsize=(10, 6))
+    labels = [row["model"] for row in comparison["models"]]
+    positions = list(range(len(labels)))
+    width = 0.36
+    ax.bar(
+        [p - width / 2 for p in positions],
+        [row["base_score"] for row in comparison["models"]],
+        width,
+        label="Base",
+        color=P["base"],
+    )
+    ax.bar(
+        [p + width / 2 for p in positions],
+        [row["refined_score"] for row in comparison["models"]],
+        width,
+        label="Refined",
+        color=P["winner"],
+    )
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.set_ylim(0, 1.12)
+    ax.set_ylabel("Held-Out Test Pass Rate")
+    ax.set_title(f"{exp['name']}: Base vs Refined Held-Out Performance")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    summary_path = output_path.with_suffix(".json")
+    summary_path.write_text(json.dumps(comparison, indent=2), encoding="utf-8")
+    return output_path, comparison
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  DB helpers
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def _connect(db_path: Path) -> sqlite3.Connection:
     if not db_path.exists():
@@ -83,13 +212,20 @@ def _load_experiment(con, eid: Optional[int]) -> dict:
     if eid is not None:
         cur.execute("SELECT id, run_id, experiment_name, model_name, config FROM experiments WHERE id=?", (eid,))
     else:
-        cur.execute("SELECT id, run_id, experiment_name, model_name, config "
-                    "FROM experiments WHERE status='completed' ORDER BY id DESC LIMIT 1")
+        cur.execute(
+            "SELECT id, run_id, experiment_name, model_name, config "
+            "FROM experiments WHERE status='completed' ORDER BY id DESC LIMIT 1"
+        )
     row = cur.fetchone()
     if not row:
         sys.exit("[ERROR] No completed experiment found.")
-    return {"id": row[0], "run_id": row[1], "name": row[2],
-            "model_name": row[3], "config": json.loads(row[4]) if row[4] else {}}
+    return {
+        "id": row[0],
+        "run_id": row[1],
+        "name": row[2],
+        "model_name": row[3],
+        "config": json.loads(row[4]) if row[4] else {},
+    }
 
 
 def _list_experiments(db_path: Path):
@@ -111,6 +247,7 @@ def _list_experiments(db_path: Path):
 #  Phase 1 — Live evaluation of the base prompt
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def _load_dataset(dataset_path: Path) -> list:
     tasks = []
     with open(dataset_path) as f:
@@ -130,6 +267,7 @@ def _build_full_prompt(base_prompt_text: str, task: dict) -> str:
 def _extract_code(response: str) -> str:
     """Extract the first Python code block from an LLM response."""
     import re
+
     blocks = re.findall(r"```(?:python)?\s*(.*?)```", response, re.DOTALL)
     if blocks:
         return blocks[0].strip()
@@ -154,9 +292,9 @@ def evaluate_base_prompt(
     Run the base prompt through the actual LLM + code evaluator.
     Returns a dict: {model_name: {passed, failed, total, syntax_errors, pass_rate}}
     """
-    from services.llm.factory import LLMFactory
-    from services.eval_service import EvalService
     from core.schema import PromptCandidate
+    from services.eval_service import EvalService
+    from services.llm.factory import LLMFactory
 
     tasks = _load_dataset(dataset_path)
     eval_service = EvalService()
@@ -171,13 +309,13 @@ def evaluate_base_prompt(
     passed_count = 0
     failed_count = 0
     syntax_count = 0
-    total        = len(tasks)
+    total = len(tasks)
 
     for i, task in enumerate(tasks):
         full_prompt = _build_full_prompt(base_prompt_text, task)
         try:
             response = adapter.generate(full_prompt)
-            code     = _extract_code(response)
+            code = _extract_code(response)
         except Exception as e:
             print(f"    [WARN] LLM call failed for task {i}: {e}")
             failed_count += 1
@@ -200,17 +338,18 @@ def evaluate_base_prompt(
     pass_rate = passed_count / total if total > 0 else 0.0
     print(f"  [BaseEval] Done in {elapsed:.1f}s — {passed_count}/{total} passed ({pass_rate:.0%})")
     return {
-        "passed":       passed_count,
-        "failed":       failed_count,
+        "passed": passed_count,
+        "failed": failed_count,
         "syntax_errors": syntax_count,
-        "total":        total,
-        "pass_rate":    pass_rate,
+        "total": total,
+        "pass_rate": pass_rate,
     }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Fallback: lightweight offline evaluation (no LLM) for demo / offline mode
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def _offline_base_score(eval_rows: list) -> float:
     """
@@ -229,6 +368,7 @@ def _offline_base_score(eval_rows: list) -> float:
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Phase 2 — Dashboard
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def _dark(fig, axes):
     fig.patch.set_facecolor(P["bg"])
@@ -254,8 +394,9 @@ def _prompt_label(pid: str) -> str:
         G4-M0 (nemotron-3-super) <- from gen-4 mutation
     """
     import re
+
     # Find all generation segments in the chained ID
-    segments = re.findall(r'gen(\d+)_m(\d+)_([^_](?:[^g]|g(?!en\d))*)', pid)
+    segments = re.findall(r"gen(\d+)_m(\d+)_([^_](?:[^g]|g(?!en\d))*)", pid)
     if not segments:
         # Fallback for simple / unexpected IDs
         return pid.replace("prompt_0_", "").replace("_cloud", "")[:22]
@@ -270,8 +411,7 @@ def _model_label(raw: str) -> str:
     return raw.replace("_", "-").replace(":cloud", "").strip("-")
 
 
-def plot_delta_chart(ax, base_scores_per_model: dict, exp_scores: dict,
-                     best_pid: str, model_names: list):
+def plot_delta_chart(ax, base_scores_per_model: dict, exp_scores: dict, best_pid: str, model_names: list):
     """
     Panel A — Score Delta Chart
     Shows base prompt score vs the overall winner directly beside it.
@@ -288,9 +428,16 @@ def plot_delta_chart(ax, base_scores_per_model: dict, exp_scores: dict,
     bars = ax.bar(labels, values, color=colors, edgecolor=P["grid"], linewidth=0.6, width=0.4)
 
     for bar, val in zip(bars, values):
-        ax.text(bar.get_x() + bar.get_width() / 2, val + 0.012,
-                f"{val:.2%}", ha="center", va="bottom",
-                color=P["text"], fontsize=10, fontweight="bold")
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            val + 0.012,
+            f"{val:.2%}",
+            ha="center",
+            va="bottom",
+            color=P["text"],
+            fontsize=10,
+            fontweight="bold",
+        )
 
     # Draw improvement arrow between base and winner
     delta = winner_score - base_mean
@@ -299,23 +446,28 @@ def plot_delta_chart(ax, base_scores_per_model: dict, exp_scores: dict,
         xy=(1, winner_score),
         xytext=(0, base_mean),
         arrowprops=dict(arrowstyle="->", color=P["winner"], lw=2),
-        color=P["winner"], fontsize=11, fontweight="bold",
-        ha="center", va="bottom",
+        color=P["winner"],
+        fontsize=11,
+        fontweight="bold",
+        ha="center",
+        va="bottom",
     )
 
     ax.set_ylim(0, 1.18)
     ax.set_ylabel("Ensemble Pass Rate", fontsize=10)
     ax.set_title(
-        "[A]  Base Prompt vs. Refined Prompt\n"
-        "(Overall Ensemble Performance)",
-        fontsize=11, fontweight="bold", pad=10,
+        "[A]  Base Prompt vs. Refined Prompt\n(Overall Ensemble Performance)",
+        fontsize=11,
+        fontweight="bold",
+        pad=10,
     )
     ax.tick_params(axis="x", labelsize=10)
     ax.axhline(base_mean, color=P["base"], linestyle="--", linewidth=1.0, alpha=0.6)
 
 
-def plot_per_model_comparison(ax, base_scores_per_model: dict, eval_rows: list,
-                               best_pid: str, model_names: list, exp_scores: dict):
+def plot_per_model_comparison(
+    ax, base_scores_per_model: dict, eval_rows: list, best_pid: str, model_names: list, exp_scores: dict
+):
     """
     Panel B — Per-Model Performance (Line Chart)
     Plots the ensemble scores of the best prompt from each generation, for each model,
@@ -325,7 +477,7 @@ def plot_per_model_comparison(ax, base_scores_per_model: dict, eval_rows: list,
     from collections import defaultdict
 
     def _gen_num(pid):
-        m = re.search(r'gen(\d+)', pid)
+        m = re.search(r"gen(\d+)", pid)
         return int(m.group(1)) if m else 0
 
     # 1. Identify the BEST prompt for each generation based on overall ensemble score (exp_scores)
@@ -338,7 +490,10 @@ def plot_per_model_comparison(ax, base_scores_per_model: dict, eval_rows: list,
 
     # Make sure we have the generation 0 best_pid mapped to 'base'
     if 0 not in gen_best:
-        gen_best[0] = ("base_prompt", sum(base_scores_per_model[m]["pass_rate"] for m in model_names) / len(model_names))
+        gen_best[0] = (
+            "base_prompt",
+            sum(base_scores_per_model[m]["pass_rate"] for m in model_names) / len(model_names),
+        )
 
     sorted_gens = sorted(gen_best.keys())
     best_pids_by_gen = {g: gen_best[g][0] for g in sorted_gens}
@@ -346,7 +501,7 @@ def plot_per_model_comparison(ax, base_scores_per_model: dict, eval_rows: list,
     # 2. Collect per-model scores for these best prompts
     # structure: model -> dict of gen -> pass_rate
     model_trajectories = {m: {} for m in model_names}
-    
+
     # Initialize gen 0
     for m in model_names:
         model_trajectories[m][0] = base_scores_per_model[m]["pass_rate"]
@@ -372,26 +527,42 @@ def plot_per_model_comparison(ax, base_scores_per_model: dict, eval_rows: list,
             # Fallback if a model didn't evaluate a specific prompt for some reason
             val = model_trajectories[m].get(g, 0.0)
             y_values.append(val)
-        
-        ax.plot(x_positions, y_values, marker='o', markersize=6, linewidth=2, 
-                color=line_colors[i % len(line_colors)], label=_model_label(m))
-        
+
+        ax.plot(
+            x_positions,
+            y_values,
+            marker="o",
+            markersize=6,
+            linewidth=2,
+            color=line_colors[i % len(line_colors)],
+            label=_model_label(m),
+        )
+
         # Annotate the final generation point
         if y_values:
-            ax.text(x_positions[-1] + 0.1, y_values[-1], f"{y_values[-1]:.0%}",
-                    va="center", ha="left", fontsize=9, color=line_colors[i % len(line_colors)], fontweight="bold")
+            ax.text(
+                x_positions[-1] + 0.1,
+                y_values[-1],
+                f"{y_values[-1]:.0%}",
+                va="center",
+                ha="left",
+                fontsize=9,
+                color=line_colors[i % len(line_colors)],
+                fontweight="bold",
+            )
 
     ax.set_xticks(x_positions)
     ax.set_xticklabels(x_labels, fontsize=9)
     ax.set_ylim(0, 1.18)
     ax.set_ylabel("Pass Rate", fontsize=9)
     ax.set_title(
-        "[B]  Per-Model Performance Across Generations\n"
-        "(Tracking the best prompt from each generation)",
-        fontsize=11, fontweight="bold", pad=10,
+        "[B]  Per-Model Performance Across Generations\n(Tracking the best prompt from each generation)",
+        fontsize=11,
+        fontweight="bold",
+        pad=10,
     )
     ax.legend(fontsize=8, labelcolor=P["text"], facecolor=P["surface"], edgecolor=P["grid"])
-    ax.grid(True, axis='y', linestyle='--', alpha=0.1, color=P["grid"])
+    ax.grid(True, axis="y", linestyle="--", alpha=0.1, color=P["grid"])
 
     """
     Panel B — Per-Model Comparison
@@ -406,74 +577,105 @@ def plot_per_model_comparison(ax, base_scores_per_model: dict, eval_rows: list,
             winner_per_model[model] = passed / total if total > 0 else 0.0
 
     short_models = [_model_label(m) for m in model_names]
-    base_vals    = [base_scores_per_model[m]["pass_rate"] for m in model_names]
-    winner_vals  = [winner_per_model.get(m, 0.0) for m in model_names]
+    base_vals = [base_scores_per_model[m]["pass_rate"] for m in model_names]
+    winner_vals = [winner_per_model.get(m, 0.0) for m in model_names]
 
     x = range(len(short_models))
     w = 0.35
-    ax.bar([i - w/2 for i in x], base_vals,   width=w, color=P["base"],   edgecolor=P["grid"],
-           lw=0.5, label="Original base prompt")
-    ax.bar([i + w/2 for i in x], winner_vals, width=w, color=P["winner"], edgecolor=P["grid"],
-           lw=0.5, label="Best refined prompt")
+    ax.bar(
+        [i - w / 2 for i in x],
+        base_vals,
+        width=w,
+        color=P["base"],
+        edgecolor=P["grid"],
+        lw=0.5,
+        label="Original base prompt",
+    )
+    ax.bar(
+        [i + w / 2 for i in x],
+        winner_vals,
+        width=w,
+        color=P["winner"],
+        edgecolor=P["grid"],
+        lw=0.5,
+        label="Best refined prompt",
+    )
 
     # Annotate deltas
     for i, (bv, wv) in enumerate(zip(base_vals, winner_vals)):
         delta = wv - bv
-        sign  = "+" if delta >= 0 else ""
-        col   = P["winner"] if delta >= 0 else P["danger"]
-        ax.text(i + w/2, wv + 0.015, f"{sign}{delta:.0%}",
-                ha="center", va="bottom", fontsize=9, fontweight="bold", color=col)
+        sign = "+" if delta >= 0 else ""
+        col = P["winner"] if delta >= 0 else P["danger"]
+        ax.text(
+            i + w / 2,
+            wv + 0.015,
+            f"{sign}{delta:.0%}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold",
+            color=col,
+        )
 
     ax.set_xticks(list(x))
     ax.set_xticklabels(short_models, fontsize=9)
     ax.set_ylim(0, 1.18)
     ax.set_ylabel("Pass Rate", fontsize=9)
     ax.set_title(
-        "[B]  Per-Model Performance: Base vs. Winner\n"
-        "(Δ labels = how much the winner improved on each model)",
-        fontsize=11, fontweight="bold", pad=10,
+        "[B]  Per-Model Performance: Base vs. Winner\n(Δ labels = how much the winner improved on each model)",
+        fontsize=11,
+        fontweight="bold",
+        pad=10,
     )
     ax.legend(fontsize=8, labelcolor=P["text"], facecolor=P["surface"], edgecolor=P["grid"])
 
 
-def plot_summary_table(ax, base_scores_per_model: dict, exp_scores: dict,
-                        best_pid: str, base_prompt: str, winner_text: str, model_names: list):
+def plot_summary_table(
+    ax,
+    base_scores_per_model: dict,
+    exp_scores: dict,
+    best_pid: str,
+    base_prompt: str,
+    winner_text: str,
+    model_names: list,
+    eval_rows: list | None = None,
+):
     """
     Panel C — Improvement Summary Table
     Clean numeric table: all the key metrics at a glance.
     """
     ax.axis("off")
 
-    base_mean   = sum(base_scores_per_model[m]["pass_rate"] for m in model_names) / len(model_names)
+    base_mean = sum(base_scores_per_model[m]["pass_rate"] for m in model_names) / len(model_names)
     winner_score = exp_scores.get(best_pid, 0.0)
-    delta        = winner_score - base_mean
-    rel_improve  = (delta / base_mean * 100) if base_mean > 0 else 0.0
+    delta = winner_score - base_mean
+    rel_improve = (delta / base_mean * 100) if base_mean > 0 else 0.0
 
     # Build table data
     rows = [
-        ["Metric",                                "Original Prompt", "Best Refined Prompt"],
-        ["Ensemble Score (mean pass rate)",        f"{base_mean:.2%}",   f"{winner_score:.2%}"],
-        ["Absolute Score Improvement",             "—",                  f"+{delta:.2%}"],
-        ["Relative Improvement",                   "—",                  f"+{rel_improve:.1f}%"],
-        ["# Models Evaluated On",                  str(len(model_names)), str(len(model_names))],
+        ["Metric", "Original Prompt", "Best Refined Prompt"],
+        ["Ensemble Score (mean pass rate)", f"{base_mean:.2%}", f"{winner_score:.2%}"],
+        ["Absolute Score Improvement", "—", f"+{delta:.2%}"],
+        ["Relative Improvement", "—", f"+{rel_improve:.1f}%"],
+        ["# Models Evaluated On", str(len(model_names)), str(len(model_names))],
     ]
     for m in model_names:
         label = _model_label(m)
         bv = base_scores_per_model[m]["pass_rate"]
-        
+
         # Calculate per-model winner score
         wv = 0.0
-        for row in eval_rows:
+        for row in eval_rows or []:
             pid, _, _, passed, _, total, _, model = row
             if pid == best_pid and model == m and total > 0:
                 wv = passed / total
                 break
-                
+
         rows.append([f"Pass Rate — {label}", f"{bv:.2%}", f"{wv:.2%}"])
 
     col_widths = [0.48, 0.26, 0.26]
     header_color = "#2C2C5C"
-    row_colors   = [P["surface"], "#1E1E38"]
+    row_colors = [P["surface"], "#1E1E38"]
 
     table = ax.table(
         cellText=rows[1:],
@@ -497,8 +699,7 @@ def plot_summary_table(ax, base_scores_per_model: dict, exp_scores: dict,
             if c == 2 and "+" in cell.get_text().get_text():
                 cell.set_text_props(color=P["winner"], fontweight="bold")
 
-    ax.set_title("[C]  Improvement Summary (Numbers at a Glance)",
-                 fontsize=11, fontweight="bold", pad=10)
+    ax.set_title("[C]  Improvement Summary (Numbers at a Glance)", fontsize=11, fontweight="bold", pad=10)
     ax.title.set_color(P["text"])
 
 
@@ -512,33 +713,61 @@ def plot_prompt_diff(ax, base_text: str, winner_text: str):
     def _wrapped(text, width=52):
         return "\n".join(wrap(text, width))
 
-    base_w   = _wrapped(base_text)
+    base_w = _wrapped(base_text)
     winner_w = _wrapped(winner_text)
 
     # Left side — base
-    ax.text(0.01, 0.97, "Original Base Prompt", transform=ax.transAxes,
-            fontsize=10, fontweight="bold", color=P["base"], va="top")
-    ax.text(0.01, 0.88, base_w, transform=ax.transAxes,
-            fontsize=8.5, color=P["text"], va="top",
-            bbox=dict(boxstyle="round,pad=0.5", facecolor=P["surface"],
-                      edgecolor=P["base"], linewidth=1.5))
+    ax.text(
+        0.01,
+        0.97,
+        "Original Base Prompt",
+        transform=ax.transAxes,
+        fontsize=10,
+        fontweight="bold",
+        color=P["base"],
+        va="top",
+    )
+    ax.text(
+        0.01,
+        0.88,
+        base_w,
+        transform=ax.transAxes,
+        fontsize=8.5,
+        color=P["text"],
+        va="top",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor=P["surface"], edgecolor=P["base"], linewidth=1.5),
+    )
 
     # Right side — winner
-    ax.text(0.51, 0.97, "Best Refined Prompt  ★", transform=ax.transAxes,
-            fontsize=10, fontweight="bold", color=P["winner"], va="top")
-    ax.text(0.51, 0.88, winner_w, transform=ax.transAxes,
-            fontsize=8.5, color=P["text"], va="top",
-            bbox=dict(boxstyle="round,pad=0.5", facecolor=P["surface"],
-                      edgecolor=P["winner"], linewidth=1.5))
+    ax.text(
+        0.51,
+        0.97,
+        "Best Refined Prompt  ★",
+        transform=ax.transAxes,
+        fontsize=10,
+        fontweight="bold",
+        color=P["winner"],
+        va="top",
+    )
+    ax.text(
+        0.51,
+        0.88,
+        winner_w,
+        transform=ax.transAxes,
+        fontsize=8.5,
+        color=P["text"],
+        va="top",
+        bbox=dict(boxstyle="round,pad=0.5", facecolor=P["surface"], edgecolor=P["winner"], linewidth=1.5),
+    )
 
-    ax.set_title("[D]  Prompt Text: Before → After",
-                 fontsize=11, fontweight="bold", pad=10)
+    ax.set_title("[D]  Prompt Text: Before → After", fontsize=11, fontweight="bold", pad=10)
     ax.title.set_color(P["text"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Orchestrator
 # ═══════════════════════════════════════════════════════════════════════════════
+
 
 def generate_comparison(
     db_path: Path,
@@ -566,8 +795,11 @@ def generate_comparison(
 
     # Load snapshot (winner info)
     cur = con.cursor()
-    cur.execute("SELECT generation, best_score, best_prompt_id, scores, best_prompt_text "
-                "FROM snapshots WHERE experiment_id=? ORDER BY generation", (eid,))
+    cur.execute(
+        "SELECT generation, best_score, best_prompt_id, scores, best_prompt_text "
+        "FROM snapshots WHERE experiment_id=? ORDER BY generation",
+        (eid,),
+    )
     snap_rows = cur.fetchall()
     if not snap_rows:
         sys.exit("[ERROR] No snapshot found for this experiment.")
@@ -580,16 +812,19 @@ def generate_comparison(
         gen_scores = json.loads(snap[3]) if snap[3] else {}
         exp_scores.update(gen_scores)
 
-    last_snap   = snap_rows[-1]
-    best_pid    = last_snap[2]
+    last_snap = snap_rows[-1]
+    best_pid = last_snap[2]
     winner_text = last_snap[4] or ""
 
     # Load prompt IDs and eval rows
     cur.execute("SELECT prompt_id FROM prompts WHERE experiment_id=? ORDER BY id", (eid,))
     prompt_ids = [r[0] for r in cur.fetchall()]
 
-    cur.execute("SELECT prompt_id, experiment_id, generation, passed, failed, total, "
-                "syntax_errors, evaluator_model FROM evaluations WHERE experiment_id=? ORDER BY id", (eid,))
+    cur.execute(
+        "SELECT prompt_id, experiment_id, generation, passed, failed, total, "
+        "syntax_errors, evaluator_model FROM evaluations WHERE experiment_id=? ORDER BY id",
+        (eid,),
+    )
     raw_evals = cur.fetchall()
 
     def _infer_model(pid, candidates):
@@ -608,12 +843,12 @@ def generate_comparison(
         else:
             model = _infer_model(r[0], model_names)
         eval_rows.append((*r[:7], model))
-        
+
     con.close()
 
     # ── Phase 1: Evaluate base prompt ────────────────────────────────────────
     base_scores_per_model = {}
-    
+
     # Try to find generation=0 scores in the database
     gen0_scores = {}
     for row in eval_rows:
@@ -622,8 +857,10 @@ def generate_comparison(
         if gen == 0 and total > 0:
             gen0_scores[model] = {
                 "pass_rate": passed / total,
-                "passed": passed, "failed": failed,
-                "total": total, "syntax_errors": syntax
+                "passed": passed,
+                "failed": failed,
+                "total": total,
+                "syntax_errors": syntax,
             }
 
     if len(gen0_scores) == len(model_names):
@@ -633,8 +870,13 @@ def generate_comparison(
         print("[WARN] --offline mode without Gen-0 data: using minimum variant score as base estimate.")
         min_score = _offline_base_score(eval_rows)
         for m in model_names:
-            base_scores_per_model[m] = {"pass_rate": min_score, "passed": 0, "failed": 0,
-                                         "total": 0, "syntax_errors": 0}
+            base_scores_per_model[m] = {
+                "pass_rate": min_score,
+                "passed": 0,
+                "failed": 0,
+                "total": 0,
+                "syntax_errors": 0,
+            }
     else:
         for model in model_names:
             print(f"\n[Phase 1] Evaluating BASE prompt on model: {model}")
@@ -642,20 +884,20 @@ def generate_comparison(
             base_scores_per_model[model] = result
 
     # ── Phase 2: Build dashboard ─────────────────────────────────────────────
-    sns.set_theme(style="dark", palette="muted")
+    if sns is not None:
+        sns.set_theme(style="dark", palette="muted")
     fig = plt.figure(figsize=(20, 18))
     fig.patch.set_facecolor(P["bg"])
-    gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.50, wspace=0.35,
-                           top=0.92, bottom=0.05, left=0.07, right=0.97)
+    gs = gridspec.GridSpec(2, 2, figure=fig, hspace=0.50, wspace=0.35, top=0.92, bottom=0.05, left=0.07, right=0.97)
     axA = fig.add_subplot(gs[0, 0])
     axB = fig.add_subplot(gs[0, 1])
     axC = fig.add_subplot(gs[1, 0])
     axD = fig.add_subplot(gs[1, 1])
 
-    base_mean    = sum(base_scores_per_model[m]["pass_rate"] for m in model_names) / len(model_names)
+    base_mean = sum(base_scores_per_model[m]["pass_rate"] for m in model_names) / len(model_names)
     winner_score = exp_scores.get(best_pid, 0.0)
-    delta        = winner_score - base_mean
-    
+    delta = winner_score - base_mean
+
     if len(gen0_scores) == len(model_names):
         mode_str = "(gen-0 db lookup)"
     else:
@@ -665,12 +907,15 @@ def generate_comparison(
         f"Synthenexa — Prompt Refinement Impact Analysis  {mode_str}\n"
         f"Experiment: {exp['name']}  |  Run: {exp['run_id']}  |  "
         f"Improvement: {base_mean:.2%} → {winner_score:.2%}  (+{delta:.2%})",
-        fontsize=13, fontweight="bold", color=P["text"], y=0.97,
+        fontsize=13,
+        fontweight="bold",
+        color=P["text"],
+        y=0.97,
     )
 
     plot_delta_chart(axA, base_scores_per_model, exp_scores, best_pid, model_names)
     plot_per_model_comparison(axB, base_scores_per_model, eval_rows, best_pid, model_names, exp_scores)
-    plot_summary_table(axC, base_scores_per_model, exp_scores, best_pid, base_text, winner_text, model_names)
+    plot_summary_table(axC, base_scores_per_model, exp_scores, best_pid, base_text, winner_text, model_names, eval_rows)
     plot_prompt_diff(axD, base_text, winner_text)
 
     _dark(fig, [axA, axB, axC, axD])
@@ -686,25 +931,46 @@ def generate_comparison(
 #  CLI
 # ═══════════════════════════════════════════════════════════════════════════════
 
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate a before-vs-after prompt refinement comparison from Synthenexa results."
     )
     parser.add_argument("--db", type=Path, default=_DEFAULT_DB)
-    parser.add_argument("--experiment-id", type=int, default=None,
-                        help="Experiment ID to compare (default: latest completed).")
-    parser.add_argument("--dataset", type=Path, default=None,
-                        help="Dataset JSONL used during the experiment (for live base evaluation).")
-    parser.add_argument("--ollama-base-url", type=str, default=None,
-                        help="Ollama base URL override.")
-    parser.add_argument("--offline", action="store_true",
-                        help="Skip live LLM evaluation; use minimum variant score as a conservative baseline estimate.")
-    parser.add_argument("--list-experiments", action="store_true",
-                        help="List all stored experiments and exit.")
+    parser.add_argument(
+        "--experiment-id", type=int, default=None, help="Experiment ID to compare (default: latest completed)."
+    )
+    parser.add_argument(
+        "--dataset",
+        type=Path,
+        default=None,
+        help="Dataset JSONL used during the experiment (for live base evaluation).",
+    )
+    parser.add_argument("--ollama-base-url", type=str, default=None, help="Ollama base URL override.")
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Skip live LLM evaluation; use minimum variant score as a conservative baseline estimate.",
+    )
+    parser.add_argument(
+        "--stored-only",
+        action="store_true",
+        help="Use only persisted held-out baseline/refined results; never run live evaluation.",
+    )
+    parser.add_argument("--list-experiments", action="store_true", help="List all stored experiments and exit.")
     args = parser.parse_args()
 
     if args.list_experiments:
         _list_experiments(args.db)
+        return
+
+    if args.stored_only or (args.dataset is None and not args.offline):
+        try:
+            output_path, comparison = generate_stored_comparison(args.db, args.experiment_id)
+        except ValueError as exc:
+            sys.exit(f"[ERROR] Stored comparison unavailable: {exc}")
+        print(f"[✓] Stored held-out comparison saved → {output_path}")
+        print(f"[Info] Mean improvement: {comparison['absolute_delta']:+.2%}")
         return
 
     # Resolve dataset path
@@ -719,8 +985,7 @@ def main():
         else:
             dataset_path = args.dataset
         if not dataset_path.exists():
-            sys.exit(f"[ERROR] Dataset not found: {dataset_path}\n"
-                     "Use --offline to skip live evaluation.")
+            sys.exit(f"[ERROR] Dataset not found: {dataset_path}\nUse --offline to skip live evaluation.")
         print(f"[Info] Dataset: {dataset_path} ({sum(1 for _ in open(dataset_path))} tasks)")
 
     generate_comparison(
