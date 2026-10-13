@@ -62,6 +62,22 @@ class ResultsRepositoryTests(unittest.TestCase):
                 + "\n",
                 encoding="utf-8",
             )
+            (experiment_dir / "final_test_evaluations.jsonl").write_text(
+                json.dumps(
+                    {
+                        "prompt_id": "prompt_0",
+                        "is_base": True,
+                        "dataset_split": "test",
+                        "evaluator_model": "model_a",
+                        "passed": 2,
+                        "failed": 0,
+                        "total": 2,
+                        "task_ids": ["t1", "t2"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
             repo = ResultsRepository(artifacts_dir=artifacts_dir, db_path=Path(tmpdir) / "missing.db")
             result = repo.load_experiment(experiment_name="demo_run", source="artifacts")
@@ -71,6 +87,8 @@ class ResultsRepositoryTests(unittest.TestCase):
             self.assertEqual(result.best_prompt["score"], 0.82)
             self.assertEqual(len(result.snapshots), 1)
             self.assertEqual(len(result.evaluations), 1)
+            self.assertEqual(len(result.final_test_evaluations), 1)
+            self.assertTrue(result.final_test_evaluations[0]["is_base"])
 
     def test_prefers_sqlite_when_available(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -84,7 +102,7 @@ class ResultsRepositoryTests(unittest.TestCase):
                 "CREATE TABLE prompts (id INTEGER PRIMARY KEY, prompt_id TEXT, experiment_id INTEGER, generation INTEGER, text TEXT, is_base INTEGER, is_best INTEGER, created_at TEXT)"
             )
             cur.execute(
-                "CREATE TABLE evaluations (id INTEGER PRIMARY KEY, prompt_id TEXT, experiment_id INTEGER, generation INTEGER, evaluator_model TEXT, passed INTEGER, failed INTEGER, total INTEGER, syntax_errors INTEGER, errors TEXT, total_time_ms FLOAT, min_time_ms FLOAT, max_time_ms FLOAT, avg_time_ms FLOAT, created_at TEXT)"
+                "CREATE TABLE evaluations (id INTEGER PRIMARY KEY, prompt_id TEXT, experiment_id INTEGER, generation INTEGER, evaluator_model TEXT, is_base INTEGER, dataset_split TEXT, task_ids TEXT, passed INTEGER, failed INTEGER, total INTEGER, syntax_errors INTEGER, errors TEXT, total_time_ms FLOAT, min_time_ms FLOAT, max_time_ms FLOAT, avg_time_ms FLOAT, created_at TEXT)"
             )
             cur.execute(
                 "CREATE TABLE snapshots (id INTEGER PRIMARY KEY, experiment_id INTEGER, generation INTEGER, best_score FLOAT, best_prompt_id TEXT, best_prompt_text TEXT, scores TEXT, reward_history TEXT, best_ensemble_scores TEXT, model_leaderboard TEXT, ensemble_scores TEXT, created_at TEXT)"
@@ -97,7 +115,14 @@ class ResultsRepositoryTests(unittest.TestCase):
                 "INSERT INTO prompts (prompt_id, experiment_id, generation, text, is_base, is_best, created_at) VALUES ('prompt_win', 1, 1, 'Prompt Winner', 0, 1, '2026-07-27')"
             )
             cur.execute(
-                "INSERT INTO evaluations (prompt_id, experiment_id, generation, evaluator_model, passed, failed, total, syntax_errors, errors, total_time_ms, min_time_ms, max_time_ms, avg_time_ms, created_at) VALUES ('prompt_win', 1, 1, 'model_a', 4, 0, 4, 0, '[]', 10, 2, 4, 2.5, '2026-07-27')"
+                "INSERT INTO evaluations (prompt_id, experiment_id, generation, evaluator_model, is_base, dataset_split, task_ids, passed, failed, total, syntax_errors, errors, total_time_ms, min_time_ms, max_time_ms, avg_time_ms, created_at) VALUES ('prompt_win', 1, 1, 'model_a', 0, 'train_validation', '[\"t1\"]', 4, 0, 4, 0, '[]', 10, 2, 4, 2.5, '2026-07-27')"
+            )
+            cur.executemany(
+                "INSERT INTO evaluations (prompt_id, experiment_id, generation, evaluator_model, is_base, dataset_split, task_ids, passed, failed, total, syntax_errors, errors, total_time_ms, min_time_ms, max_time_ms, avg_time_ms, created_at) VALUES (?, 1, -1, ?, ?, 'test', '[\"t1\"]', ?, ?, 4, 0, '[]', 10, 2, 4, 2.5, '2026-07-27')",
+                [
+                    ("prompt_0", "model_a", 1, 2, 2),
+                    ("prompt_win", "model_a", 0, 3, 1),
+                ],
             )
             cur.execute(
                 "INSERT INTO snapshots (experiment_id, generation, best_score, best_prompt_id, best_prompt_text, scores, reward_history, best_ensemble_scores, model_leaderboard, ensemble_scores, created_at) VALUES (1, 1, 1.0, 'prompt_win', 'Prompt Winner', ?, ?, ?, ?, ?, '2026-07-27')",
@@ -118,6 +143,7 @@ class ResultsRepositoryTests(unittest.TestCase):
             self.assertEqual(result.source, "sqlite")
             self.assertEqual(result.experiment_name, "sqlite_exp")
             self.assertEqual(result.best_prompt["prompt_id"], "prompt_win")
+            self.assertEqual(len(result.final_test_evaluations), 2)
 
 
 if __name__ == "__main__":
