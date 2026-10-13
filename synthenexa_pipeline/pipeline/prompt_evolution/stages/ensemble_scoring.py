@@ -30,7 +30,7 @@ from core.context import PipelineContext
 from pipeline.prompt_evolution.stages.base import Stage
 
 
-AggregationStrategy = Literal["mean", "min", "median", "max", "vote"]
+AggregationStrategy = Literal["mean", "min", "median", "max", "vote", "robust"]
 
 
 class EnsembleScoringStage(Stage):
@@ -40,11 +40,11 @@ class EnsembleScoringStage(Stage):
 
     Args:
         strategy: How to aggregate per-model scores.
-                  One of 'mean' (default), 'min', 'median', 'max', or 'vote'.
+                  One of 'mean', 'min', 'median', 'max', 'vote', or 'robust'.
     """
 
     def __init__(self, strategy: AggregationStrategy = "mean") -> None:
-        if strategy not in ("mean", "min", "median", "max", "vote"):
+        if strategy not in ("mean", "min", "median", "max", "vote", "robust"):
             raise ValueError(f"Unknown ensemble aggregation strategy: {strategy!r}")
         self.strategy = strategy
 
@@ -54,19 +54,33 @@ class EnsembleScoringStage(Stage):
             f"(strategy={self.strategy})...\n"
         )
         context.scores = {}
+        context.ensemble_score_summary = {}
 
         # Direct lookup by globally-unique UID (set by EnsembleExecutionStage Phase 1)
         candidate_by_id = {c.id: c for c in context.candidate_prompts}
         vote_counts: dict[str, int] = {candidate.id: 0 for candidate in context.candidate_prompts}
         total_models = len({m for scores in context.ensemble_scores.values() for m in scores})
 
+        # Prefer the search/validation split when available. This prevents a
+        # candidate from winning solely by overfitting the mutation search set.
+        selection_scores: dict[str, dict[str, float]] = {}
+        for prompt_id, model_scores in context.ensemble_scores.items():
+            selection_scores[prompt_id] = {}
+            for model_name, overall in model_scores.items():
+                splits = context.ensemble_split_scores.get(prompt_id, {}).get(model_name, {})
+                search = splits.get("train", overall)
+                validation = splits.get("validation")
+                selection_scores[prompt_id][model_name] = (
+                    0.7 * search + 0.3 * validation if validation is not None else overall
+                )
+
         if self.strategy == "vote":
             # Ranking-based voting: each model casts one vote for the prompt(s) with its best score.
             for model_name in {m for scores in context.ensemble_scores.values() for m in scores}:
                 model_candidates = {
-                    prompt_id: model_scores[model_name]
-                    for prompt_id, model_scores in context.ensemble_scores.items()
-                    if model_name in model_scores
+                    prompt_id: selection_scores[prompt_id][model_name]
+                    for prompt_id in selection_scores
+                    if model_name in selection_scores[prompt_id]
                 }
                 if not model_candidates:
                     continue
@@ -80,9 +94,18 @@ class EnsembleScoringStage(Stage):
                 context.scores[prompt_id] = 0.0
                 continue
 
-            values = list(model_scores.values())
+            values = list(selection_scores.get(prompt_id, model_scores).values())
+            mean_score = sum(values) / len(values)
+            min_score = min(values)
+            max_score = max(values)
+            context.ensemble_score_summary[prompt_id] = {
+                "mean": mean_score,
+                "minimum": min_score,
+                "maximum": max_score,
+                "spread": max_score - min_score,
+            }
             if self.strategy == "mean":
-                combined = sum(values) / len(values)
+                combined = mean_score
             elif self.strategy == "min":
                 combined = min(values)
             elif self.strategy == "median":
@@ -90,6 +113,9 @@ class EnsembleScoringStage(Stage):
             elif self.strategy == "vote":
                 # Ranking-based vote: score is the share of models that selected this prompt.
                 combined = vote_counts.get(prompt_id, 0) / total_models if total_models else 0.0
+            elif self.strategy == "robust":
+                # Reward average quality while protecting against a weak model.
+                combined = 0.7 * mean_score + 0.3 * min_score
             else:  # max
                 combined = max(values)
 
@@ -112,6 +138,10 @@ class EnsembleScoringStage(Stage):
 
             print("Score:")
             print(f"  Ensemble: {combined:.4f}\n")
+            print(
+                f"  Mean: {mean_score:.4f} | Weakest: {min_score:.4f} | "
+                f"Strongest: {max_score:.4f} | Spread: {max_score - min_score:.4f}\n"
+            )
             
             print("Individual Performance:")
             for m, s in sorted(model_scores.items()):
