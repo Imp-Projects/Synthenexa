@@ -115,7 +115,7 @@ def import_experiment(experiment_name: str, db_path: Path, force: bool = False) 
         prompt_count = 0
         for row in result.prompts:
             pid = row.get("prompt_id") or row.get("id", "")
-            generation = row.get("generation") or _infer_generation(pid)
+            generation = row.get("generation") if row.get("generation") is not None else _infer_generation(pid)
             key = (pid, eid, generation)
             if key in seen_prompt_keys:
                 continue
@@ -149,9 +149,15 @@ def import_experiment(experiment_name: str, db_path: Path, force: bool = False) 
 
         # Evaluations
         eval_count = 0
-        for row in result.evaluations:
+        all_evaluations = list(result.evaluations) + [
+            {**row, "generation": -1, "dataset_split": "test"}
+            for row in result.final_test_evaluations
+        ]
+        for row in all_evaluations:
             pid = row.get("prompt_id", "")
-            generation = row.get("generation") or _infer_generation(pid)
+            generation = row.get("generation") if row.get("generation") is not None else _infer_generation(pid)
+            if row.get("is_base") and pid == "prompt_0" and row.get("dataset_split") != "test":
+                generation = 0
             evaluator_model = row.get("evaluator_model") or _infer_origin_model(pid, ensemble_models)
             errors_val = row.get("errors", [])
             session.add(Evaluation(
@@ -159,6 +165,9 @@ def import_experiment(experiment_name: str, db_path: Path, force: bool = False) 
                 experiment_id=eid,
                 generation=generation,
                 evaluator_model=evaluator_model,
+                is_base=bool(row.get("is_base", False)),
+                dataset_split=row.get("dataset_split", "all"),
+                task_ids=row.get("task_ids", []),
                 passed=int(row.get("passed", 0)),
                 failed=int(row.get("failed", 0)),
                 total=int(row.get("total", 0)),
