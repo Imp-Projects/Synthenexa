@@ -24,14 +24,11 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
-
-# ── Ensure synthenexa_pipeline/ is on sys.path so bare imports work ─────────
-_HERE = os.path.dirname(os.path.abspath(__file__))  # scripts/
-_PIPELINE = os.path.dirname(_HERE)  # synthenexa_pipeline/
-if _PIPELINE not in sys.path:
-    sys.path.insert(0, _PIPELINE)
-# ─────────────────────────────────────────────────────────────────────────────
+from datetime import datetime, timezone
+from copy import copy
+from typing import cast
 
 import requests
 from core.config import DATASET_PATH, MODEL_NAME, NUM_MUTATIONS, STORAGE_BACKEND, RLConfig
@@ -39,7 +36,7 @@ from core.context import PipelineContext
 from core.schema import PromptCandidate
 from pipeline.prompt_evolution.policies.registry import PolicyRegistry
 from pipeline.prompt_evolution.stages.ensemble_execution import EnsembleExecutionStage
-from pipeline.prompt_evolution.stages.ensemble_scoring import EnsembleScoringStage
+from pipeline.prompt_evolution.stages.ensemble_scoring import AggregationStrategy, EnsembleScoringStage
 from pipeline.prompt_evolution.stages.evaluation import EvaluationStage
 from pipeline.prompt_evolution.stages.execution import ExecutionStage
 from pipeline.prompt_evolution.stages.mutation import MutationStage
@@ -48,10 +45,21 @@ from pipeline.prompt_evolution.stages.selection import SelectionStage
 from pipeline.prompt_evolution.workflow import PromptEvolutionWorkflow
 from services.dataset_service import DatasetService
 from services.eval_service import EvalService
-from services.llm.registry import ModelRegistry, _infer_priority, normalize_model_name
+from services.llm.registry import ModelRegistry, _infer_provider, normalize_model_name
 from services.llm_service import LLMService
+from services.llm_cache import LLMResponseCache
 from services.storage import StorageService
 from services.tracker import RLTracker
+
+# ── Ensure synthenexa_pipeline/ is on sys.path so bare imports work ─────────
+_HERE = os.path.dirname(os.path.abspath(__file__))  # scripts/
+_PIPELINE = os.path.dirname(_HERE)  # synthenexa_pipeline/
+if _PIPELINE not in sys.path:
+    sys.path.insert(0, _PIPELINE)
+# ─────────────────────────────────────────────────────────────────────────────
+
+MAX_GENERATIONS = 3
+MAX_MUTATIONS = 5
 
 # ------------------------------------------------------------------ #
 #  Helpers                                                            #
@@ -84,11 +92,13 @@ def _load_base_prompt(path: str) -> PromptCandidate:
                 return PromptCandidate(
                     id="prompt_0",
                     text=data.get("prompt", "Write a Python function to solve the given task."),
+                    is_base=True,
                 )
     # Fallback default
     return PromptCandidate(
         id="prompt_0",
         text="Write a Python function to solve the given task.",
+        is_base=True,
     )
 
 
@@ -105,9 +115,9 @@ def _print_reward_table(reward_history: dict) -> None:
     print("=" * 50)
 
 
-def _available_ollama_models(base_url: str = None) -> list[str]:
+def _available_ollama_models(base_url: str | None = None) -> list[str]:
     """Return the list of installed Ollama models discovered from the local API."""
-    candidate_urls = []
+    candidate_urls: list[str] = []
     if base_url:
         candidate_urls.append(base_url)
     for env_name in ("OLLAMA_BASE_URL", "OLLAMA_API_BASE"):
@@ -165,6 +175,51 @@ def _priority_sorted_models(
 def _safe_name(model_name: str) -> str:
     """Create a filesystem-safe experiment name from a model identifier."""
     return re.sub(r"[^A-Za-z0-9._-]+", "_", model_name).strip("._-")
+
+
+def _load_optimization_tasks(args) -> tuple[list[dict], list[dict], dict]:
+    """Load selection tasks and a disjoint held-out test set."""
+    dataset_path = args.dataset
+    if not os.path.isabs(dataset_path):
+        dataset_path = os.path.join(_PIPELINE, dataset_path)
+    tasks = DatasetService.load_dataset(dataset_path)
+    if not tasks:
+        raise RuntimeError(f"No tasks loaded from '{dataset_path}'.")
+
+    if getattr(args, "no_partition", False):
+        return (
+            tasks,
+            [],
+            {
+                "partitioned": False,
+                "dataset_hash": DatasetService.dataset_hash(tasks),
+                "task_ids": {"all": [task["task_id"] for task in tasks]},
+            },
+        )
+
+    partitioned = DatasetService.partition_dataset(
+        tasks,
+        seed=getattr(args, "seed", None) or 0,
+        train_ratio=getattr(args, "train_ratio", 0.6),
+        validation_ratio=getattr(args, "validation_ratio", 0.2),
+        test_ratio=getattr(args, "test_ratio", 0.2),
+    )
+    selection_tasks = partitioned["train"] + partitioned["validation"]
+    return (
+        selection_tasks,
+        partitioned["test"],
+        {
+            "partitioned": True,
+            "dataset_hash": partitioned["dataset_hash"],
+            "seed": partitioned["seed"],
+            "task_ids": partitioned["task_ids"],
+            "ratios": {
+                "train": getattr(args, "train_ratio", 0.6),
+                "validation": getattr(args, "validation_ratio", 0.2),
+                "test": getattr(args, "test_ratio", 0.2),
+            },
+        },
+    )
 
 
 def _interactive_model_selection(args) -> list[str]:
@@ -287,6 +342,75 @@ def _resolve_model_list(args) -> list[str]:
     return [normalize_model_name(getattr(args, "model", MODEL_NAME))]
 
 
+def _validate_ollama_experiment(args, model_names: list[str]) -> None:
+    """Enforce the small-budget, Ollama-only prototype execution policy."""
+    if not 1 <= args.generations <= MAX_GENERATIONS:
+        raise ValueError(f"--generations must be between 1 and {MAX_GENERATIONS}.")
+    if not 1 <= args.mutations <= MAX_MUTATIONS:
+        raise ValueError(f"--mutations must be between 1 and {MAX_MUTATIONS}.")
+
+    non_ollama = [
+        model for model in model_names
+        if _infer_provider(normalize_model_name(model)) != "ollama"
+    ]
+    if non_ollama:
+        raise ValueError(
+            "This prototype is configured for Ollama-only experiments; "
+            f"unsupported model(s): {', '.join(non_ollama)}"
+        )
+
+
+def _estimate_llm_calls(model_count: int, generations: int, mutations: int, selection_tasks: int, test_tasks: int) -> int:
+    """Estimate worst-case Ollama calls before an expensive run starts."""
+    baseline = model_count * selection_tasks
+    mutation_calls = generations * model_count * mutations
+    candidates_per_generation = model_count * mutations
+    execution_calls = generations * model_count * candidates_per_generation * selection_tasks
+    final_test = 2 * model_count * test_tasks
+    return baseline + mutation_calls + execution_calls + final_test
+
+
+def _historical_avg_call_seconds() -> float:
+    """Infer an average Ollama latency from completed local artifact manifests."""
+    default_seconds = 8.0
+    artifact_root = os.path.join(_PIPELINE, "experiments", "artifacts")
+    samples = []
+    if not os.path.isdir(artifact_root):
+        return default_seconds
+    for experiment_name in os.listdir(artifact_root):
+        manifest_path = os.path.join(artifact_root, experiment_name, "manifest.json")
+        if not os.path.isfile(manifest_path):
+            continue
+        try:
+            with open(manifest_path, encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            elapsed = float(manifest.get("elapsed_seconds", 0.0))
+            stats = manifest.get("call_stats", {})
+            calls = sum(float(stats.get(key, 0)) for key in ("mutation_calls", "generation_calls"))
+            if elapsed > 0 and calls > 0:
+                samples.append(elapsed / calls)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            continue
+    # Ignore implausible values caused by interrupted runs or tiny smoke tests.
+    valid = [sample for sample in samples if 0.5 <= sample <= 300.0]
+    return sum(valid) / len(valid) if valid else default_seconds
+
+
+def _check_call_budget(args, model_count: int, selection_tasks: int, test_tasks: int) -> int:
+    estimate = _estimate_llm_calls(model_count, args.generations, args.mutations, selection_tasks, test_tasks)
+    limit = getattr(args, "max_llm_calls", 1200)
+    print(f"Estimated worst-case Ollama calls: {estimate} (limit={limit})")
+    avg_seconds = _historical_avg_call_seconds()
+    estimated_minutes = estimate * avg_seconds / 60.0
+    print(
+        f"Estimated time to complete the entire workflow: ~{estimated_minutes:.1f} minutes "
+        f"({avg_seconds:.1f}s average Ollama call inferred automatically; local evaluation overhead excluded)."
+    )
+    if estimate > limit:
+        raise ValueError(f"Estimated Ollama calls ({estimate}) exceed --max-llm-calls ({limit}).")
+    return estimate
+
+
 def _print_comparison_table(results: list[dict]) -> None:
     """Print a simple comparison table for multi-model runs."""
     print("\n" + "=" * 80)
@@ -302,7 +426,7 @@ def _print_comparison_table(results: list[dict]) -> None:
     print("=" * 80)
 
 
-def _save_comparison_summary(name: str, results: list[dict], base_dir: str = None) -> str:
+def _save_comparison_summary(name: str, results: list[dict], base_dir: str | None = None) -> str:
     """Persist a JSON summary of multi-model comparison runs."""
     base_dir = base_dir or os.path.join(_PIPELINE, "experiments", "artifacts")
     target_dir = os.path.join(base_dir, name)
@@ -319,6 +443,7 @@ def _save_comparison_summary(name: str, results: list[dict], base_dir: str = Non
 
 def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: str) -> dict:
     """Run the prompt-evolution workflow for one model and return a summary record."""
+    started_monotonic = time.monotonic()
     print(f"\n{'=' * 60}")
     print("  Synthenexa — Prompt Evolution Pipeline")
     print(f"{'=' * 60}")
@@ -332,23 +457,19 @@ def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: 
     print(f"  Eval backend: {eval_backend}")
     print(f"{'=' * 60}\n")
 
-    dataset_path = args.dataset
-    if not os.path.isabs(dataset_path):
-        dataset_path = os.path.join(_PIPELINE, dataset_path)
-
-    tasks = DatasetService.load_dataset(dataset_path)
-    if not tasks:
-        raise RuntimeError(f"No tasks loaded from '{dataset_path}'.")
-    print(f"Loaded {len(tasks)} tasks from dataset.\n")
+    tasks, test_tasks, partition_metadata = _load_optimization_tasks(args)
+    print(f"Loaded {len(tasks)} selection tasks and {len(test_tasks)} held-out test tasks.\n")
+    _check_call_budget(args, 1, len(tasks), len(test_tasks))
 
     base_prompt_path = os.path.join(_PIPELINE, "Dataset", "base_prompt.jsonl")
     base_prompt = _load_base_prompt(base_prompt_path)
     print(f"Base prompt: {base_prompt.text!r}\n")
 
     llm_service = LLMService(model=model_name, base_url=args.ollama_base_url)
+    cache = LLMResponseCache(os.path.join(_PIPELINE, "experiments", "cache"))
 
     eval_service = EvalService()
-    print(f"[EvalBackend] Using local exec() evaluator")
+    print("[EvalBackend] Using local exec() evaluator")
     # Resolve storage backend: CLI flag → env var → default "file"
     storage_backend = getattr(args, "storage", None) or STORAGE_BACKEND
     storage = StorageService(
@@ -365,6 +486,10 @@ def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: 
             "mutations": args.mutations,
             "policy": args.policy,
             "eval_backend": getattr(args, "eval_backend", "local"),
+            "dataset_split": getattr(args, "dataset_split", "all"),
+            "seed": getattr(args, "seed", None),
+            "partition_metadata": partition_metadata,
+            "base_prompt": {"id": base_prompt.id, "text": base_prompt.text},
         },
     )
     tracker = RLTracker()
@@ -372,9 +497,13 @@ def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: 
     rl_config = RLConfig(policy_type=args.policy, epsilon=args.epsilon)
     policy = PolicyRegistry.get_policy(rl_config)
 
+    # Mutation uses a higher temperature inside MutationStage so candidates
+    # are diverse; code generation stays deterministic at temperature=0.0.
+    # The stages form the per-generation DAG:
+    # mutation → execution → evaluation → scoring → selection.
     stages = [
-        MutationStage(llm_service=llm_service, num_mutations=args.mutations),
-        ExecutionStage(llm_service=llm_service),
+        MutationStage(llm_service=llm_service, num_mutations=args.mutations, cache=cache),
+        ExecutionStage(llm_service=llm_service, cache=cache),
         EvaluationStage(eval_service=eval_service),
         ScoringStage(),
         SelectionStage(policy=policy),
@@ -385,6 +514,10 @@ def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: 
         run_id=run_id,
         base_prompt=base_prompt,
         tasks=tasks,
+        test_tasks=test_tasks,
+        dataset_split="train_validation" if test_tasks else "all",
+        seed=getattr(args, "seed", None),
+        partition_metadata=partition_metadata,
     )
 
     workflow = PromptEvolutionWorkflow(
@@ -396,6 +529,14 @@ def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: 
     )
 
     final_context = workflow.run(generations=args.generations)
+
+    storage.update_run_metadata({
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "elapsed_seconds": round(time.monotonic() - started_monotonic, 2),
+        "call_stats": final_context.call_stats,
+        "selected_prompt_id": final_context.best_prompt.id if final_context.best_prompt else None,
+        "selected_prompt_hash": final_context.best_prompt.prompt_hash if final_context.best_prompt else None,
+    })
 
     # Finalise the experiment record (no-op for file backend)
     storage.finalize_experiment(
@@ -428,6 +569,13 @@ def _run_single_experiment(args, model_name: str, run_id: str, experiment_name: 
                     "text": final_context.best_prompt.text,
                     "score": final_context.best_score,
                     "reward_history": final_context.reward_history,
+                    "origin_model": final_context.best_prompt.origin_model,
+                    "generation": final_context.best_prompt.generation,
+                    "mutation_idx": final_context.best_prompt.mutation_idx,
+                    "parent_id": final_context.best_prompt.parent_id,
+                    "mutation_role": final_context.best_prompt.mutation_role,
+                    "prompt_hash": final_context.best_prompt.prompt_hash,
+                    "call_stats": final_context.call_stats,
                 },
                 handle,
                 indent=2,
@@ -451,7 +599,12 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
     independently. EnsembleScoringStage then aggregates the per-model scores
     into a single combined reward used to select the next-generation prompt.
     """
-    strategy = getattr(args, "ensemble_strategy", "mean")
+    strategy_name = str(getattr(args, "ensemble_strategy", "mean"))
+    valid_strategies: set[AggregationStrategy] = {"mean", "min", "median", "max", "vote", "robust"}
+    if strategy_name not in valid_strategies:
+        raise ValueError(f"Unknown ensemble aggregation strategy: {strategy_name!r}")
+    strategy = cast(AggregationStrategy, strategy_name)
+    started_monotonic = time.monotonic()
     print(f"\n{'=' * 60}")
     print("  Synthenexa — Ensemble Prompt Evolution Pipeline")
     print(f"{'=' * 60}")
@@ -464,14 +617,9 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
     print(f"  Strategy:     {strategy}")
     print(f"{'=' * 60}\n")
 
-    dataset_path = args.dataset
-    if not os.path.isabs(dataset_path):
-        dataset_path = os.path.join(_PIPELINE, dataset_path)
-
-    tasks = DatasetService.load_dataset(dataset_path)
-    if not tasks:
-        raise RuntimeError(f"No tasks loaded from '{dataset_path}'.")
-    print(f"Loaded {len(tasks)} tasks from dataset.\n")
+    tasks, test_tasks, partition_metadata = _load_optimization_tasks(args)
+    print(f"Loaded {len(tasks)} selection tasks and {len(test_tasks)} held-out test tasks.\n")
+    _check_call_budget(args, len(model_names), len(tasks), len(test_tasks))
 
     base_prompt_path = os.path.join(_PIPELINE, "Dataset", "base_prompt.jsonl")
     base_prompt = _load_base_prompt(base_prompt_path)
@@ -479,17 +627,18 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
 
     # Build the evaluation backend (shared across all models)
     eval_service = EvalService()
-    print(f"[EvalBackend] Using local exec() evaluator")
+    print("[EvalBackend] Using local exec() evaluator")
 
     # Build per-model sub-pipelines
     model_pipelines = []
+    cache = LLMResponseCache(os.path.join(_PIPELINE, "experiments", "cache"))
     for model_name in model_names:
         llm = LLMService(model=model_name, base_url=args.ollama_base_url)
         model_pipelines.append(
             (
                 model_name,
-                MutationStage(llm_service=llm, num_mutations=args.mutations),
-                ExecutionStage(llm_service=llm),
+                MutationStage(llm_service=llm, num_mutations=args.mutations, cache=cache),
+                ExecutionStage(llm_service=llm, cache=cache),
                 EvaluationStage(eval_service=eval_service),
             )
         )
@@ -509,6 +658,10 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
             "mutations": args.mutations,
             "policy": args.policy,
             "eval_backend": getattr(args, "eval_backend", "local"),
+            "dataset_split": getattr(args, "dataset_split", "all"),
+            "seed": getattr(args, "seed", None),
+            "partition_metadata": partition_metadata,
+            "base_prompt": {"id": base_prompt.id, "text": base_prompt.text},
             "ensemble_models": model_names,
             "ensemble_strategy": strategy,
         },
@@ -518,7 +671,8 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
     rl_config = RLConfig(policy_type=args.policy, epsilon=args.epsilon)
     policy = PolicyRegistry.get_policy(rl_config)
 
-    # Ensemble DAG: EnsembleExecution → EnsembleScoring → Selection
+    # Ensemble DAG: mutate and cross-evaluate candidates on every Ollama model,
+    # aggregate their scores, then select the next parent prompt.
     stages = [
         EnsembleExecutionStage(model_pipelines=model_pipelines),
         EnsembleScoringStage(strategy=strategy),
@@ -530,6 +684,10 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
         run_id=run_id,
         base_prompt=base_prompt,
         tasks=tasks,
+        test_tasks=test_tasks,
+        dataset_split="train_validation" if test_tasks else "all",
+        seed=getattr(args, "seed", None),
+        partition_metadata=partition_metadata,
     )
 
     workflow = PromptEvolutionWorkflow(
@@ -541,6 +699,14 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
     )
 
     final_context = workflow.run(generations=args.generations)
+
+    storage.update_run_metadata({
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "elapsed_seconds": round(time.monotonic() - started_monotonic, 2),
+        "call_stats": final_context.call_stats,
+        "selected_prompt_id": final_context.best_prompt.id if final_context.best_prompt else None,
+        "selected_prompt_hash": final_context.best_prompt.prompt_hash if final_context.best_prompt else None,
+    })
 
     storage.finalize_experiment(
         best_prompt=final_context.best_prompt,
@@ -609,6 +775,13 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
                     "text": final_context.best_prompt.text,
                     "score": final_context.best_score,
                     "reward_history": final_context.reward_history,
+                    "origin_model": final_context.best_prompt.origin_model,
+                    "generation": final_context.best_prompt.generation,
+                    "mutation_idx": final_context.best_prompt.mutation_idx,
+                    "parent_id": final_context.best_prompt.parent_id,
+                    "mutation_role": final_context.best_prompt.mutation_role,
+                    "prompt_hash": final_context.best_prompt.prompt_hash,
+                    "call_stats": final_context.call_stats,
                 },
                 handle,
                 indent=2,
@@ -625,6 +798,53 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
     }
 
 
+def _run_repeated_experiments(args, model_names: list[str]) -> list[dict]:
+    """Run independent repetitions with unique artifact names and stable seeds."""
+    base_name = args.experiment or "repeated_experiment"
+    base_seed = args.seed if args.seed is not None else 0
+    all_results: list[dict] = []
+
+    for repetition in range(1, args.repetitions + 1):
+        repetition_args = copy(args)
+        repetition_args.seed = base_seed + repetition - 1
+        repetition_name = f"{base_name}_rep{repetition}"
+        print(f"\n### Repetition {repetition}/{args.repetitions} (seed={repetition_args.seed}) ###")
+
+        if args.ensemble:
+            if len(model_names) < 2:
+                raise ValueError("--ensemble repetitions require at least two models.")
+            all_results.append(
+                _run_ensemble_experiment(
+                    repetition_args,
+                    model_names,
+                    str(uuid.uuid4())[:8],
+                    repetition_name,
+                )
+            )
+            continue
+
+        for model_name in model_names:
+            model_experiment_name = (
+                f"{repetition_name}_{_safe_name(model_name)}" if len(model_names) > 1 else repetition_name
+            )
+            all_results.append(
+                _run_single_experiment(
+                    repetition_args,
+                    model_name,
+                    str(uuid.uuid4())[:8],
+                    model_experiment_name,
+                )
+            )
+
+    summary_dir = os.path.join(_PIPELINE, "experiments", "artifacts", base_name)
+    os.makedirs(summary_dir, exist_ok=True)
+    summary_path = os.path.join(summary_dir, "repetitions_summary.json")
+    with open(summary_path, "w", encoding="utf-8") as handle:
+        json.dump(all_results, handle, indent=2, default=str)
+    print(f"\nRepetition summary written to {summary_path}")
+    return all_results
+
+
 # ------------------------------------------------------------------ #
 #  Main                                                               #
 # ------------------------------------------------------------------ #
@@ -633,26 +853,42 @@ def _run_ensemble_experiment(args, model_names: list[str], run_id: str, experime
 def main():
     parser = argparse.ArgumentParser(description="Synthenexa — RL-based prompt optimization pipeline.")
     parser.add_argument(
-        "--generations", type=int, default=3, help="Number of evolution generations to run (default: 3)."
+        "--generations", type=int, default=3, help="Number of evolution generations to run (1–3; default: 3)."
+    )
+    parser.add_argument(
+        "--repetitions",
+        type=int,
+        default=1,
+        help="Number of independent runs with incremented seeds; useful for checking consistency (default: 1).",
     )
     parser.add_argument(
         "--mutations",
         type=int,
         default=NUM_MUTATIONS,
-        help=f"Number of prompt mutations per generation (default: {NUM_MUTATIONS}).",
+        help=(
+            f"Number of candidate prompt mutations created from the current parent per generation "
+            f"(1–5; default: {NUM_MUTATIONS})."
+        ),
+    )
+    parser.add_argument(
+        "--max-llm-calls",
+        type=int,
+        default=1200,
+        help="Maximum estimated Ollama calls allowed before starting (default: 1200).",
     )
     parser.add_argument(
         "--model",
         type=str,
         default=MODEL_NAME,
         help=(
-            f"Model to use (default: {MODEL_NAME}). "
-            "Use 'openai:<name>' for OpenAI, 'gemini:<name>' for Gemini, "
-            "or a bare name for Ollama."
+            f"Ollama model to use (default: {MODEL_NAME}). Only Ollama models are permitted."
         ),
     )
     parser.add_argument(
-        "--models", type=str, default="", help="Comma-separated list of models to evaluate sequentially."
+        "--models",
+        type=str,
+        default="",
+        help="Comma-separated Ollama models; ensemble mode cross-evaluates every candidate on each model.",
     )
     parser.add_argument(
         "--interactive",
@@ -663,8 +899,7 @@ def main():
         "--available-models",
         action="store_true",
         help=(
-            "Run the workflow against all available models in priority order: "
-            "OpenAI (if OPENAI_API_KEY set) → Gemini (if GEMINI_API_KEY set) → Ollama local models."
+            "Run the workflow against available Ollama models only."
         ),
     )
     parser.add_argument("--exclude-models", type=str, default="", help="Comma-separated list of models to skip.")
@@ -689,9 +924,20 @@ def main():
         type=str,
         default="greedy",
         choices=["greedy", "epsilon_greedy"],
-        help="Selection policy (default: greedy).",
+        help=(
+            "How the next parent prompt is selected. 'greedy' always chooses the highest-scoring candidate; "
+            "'epsilon_greedy' sometimes explores a random candidate (default: greedy)."
+        ),
     )
-    parser.add_argument("--epsilon", type=float, default=0.1, help="Epsilon for epsilon-greedy policy (default: 0.1).")
+    parser.add_argument(
+        "--epsilon",
+        type=float,
+        default=0.1,
+        help=(
+            "Exploration probability for epsilon-greedy selection: 0.0 always exploits and 1.0 always explores "
+            "(default: 0.1)."
+        ),
+    )
     parser.add_argument(
         "--dataset", type=str, default=DATASET_PATH, help=f"Path to MBPP micro dataset (default: {DATASET_PATH})."
     )
@@ -704,6 +950,42 @@ def main():
         default="local",
         choices=["local"],
         help="Evaluation backend for the current workflow. The ensemble pipeline currently uses the local exec() evaluator.",
+    )
+    parser.add_argument(
+        "--dataset-split",
+        type=str,
+        default="all",
+        choices=["all", "train", "validation", "test"],
+        help="Dataset partition label saved with experiment results (default: all).",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed used to create deterministic dataset partitions and recorded for reproducibility.",
+    )
+    parser.add_argument(
+        "--train-ratio",
+        type=float,
+        default=0.6,
+        help="Fraction of tasks assigned to training (default: 0.6).",
+    )
+    parser.add_argument(
+        "--validation-ratio",
+        type=float,
+        default=0.2,
+        help="Fraction of tasks assigned to validation (default: 0.2).",
+    )
+    parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=0.2,
+        help="Fraction of tasks reserved for final testing (default: 0.2).",
+    )
+    parser.add_argument(
+        "--no-partition",
+        action="store_true",
+        help="Disable train/validation/test partitioning for legacy smoke runs.",
     )
     parser.add_argument(
         "--storage",
@@ -743,14 +1025,15 @@ def main():
         "--ensemble-strategy",
         type=str,
         default="mean",
-        choices=["mean", "min", "median", "max", "vote"],
+        choices=["mean", "min", "median", "max", "vote", "robust"],
         help=(
             "How to aggregate per-model scores in ensemble mode: "
             "'mean' (default) rewards consistent cross-model performance; "
             "'min' rewards prompts that never fail on any model; "
             "'median' rewards the typical model response while ignoring outliers; "
             "'max' rewards prompts that excel on at least one model; "
-            "'vote' is ranking-based and counts the fraction of models that picked the prompt as best."
+            "'vote' is ranking-based and counts the fraction of models that picked the prompt as best; "
+            "'robust' combines mean performance (70%%) with the weakest model (30%%)."
         ),
     )
     args = parser.parse_args()
@@ -768,6 +1051,18 @@ def main():
     model_names = _resolve_model_list(args)
     if not model_names:
         model_names = [args.model]
+
+    try:
+        _validate_ollama_experiment(args, model_names)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    if args.repetitions < 1:
+        parser.error("--repetitions must be at least 1")
+
+    if args.repetitions > 1:
+        _run_repeated_experiments(args, model_names)
+        return
 
     # ── Ensemble mode: cross-model joint optimization ──────────────────
     if getattr(args, "ensemble", False):
