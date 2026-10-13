@@ -71,7 +71,9 @@ class LLMService:
             
             # Find the next best fallback model
             registry = ModelRegistry()
-            available_models = registry.list()
+            # Never silently switch this constrained experiment to a paid
+            # provider after an Ollama quota/error event.
+            available_models = [spec for spec in registry.list() if spec.provider == "ollama"]
             available_models.sort(key=lambda s: s.priority)
             
             fallback_spec = None
