@@ -69,3 +69,17 @@ The system is built around a simple principle: **universal prompt quality is mea
 - [QUICKSTART.md](QUICKSTART.md) — Set up the project and run your first experiment
 - [ARCHITECTURE.md](ARCHITECTURE.md) — How the system is structured and why
 - [commands.md](commands.md) — Command cheat-sheet for all supported providers
+
+## Evidence of Prompt Refinement
+
+The project demonstrates improvement through a matched, held-out comparison:
+
+1. The original `prompt_0` is evaluated on every selected model.
+2. Mutations and selection use only train/validation tasks.
+3. The frozen refined prompt and `prompt_0` are both evaluated on the same held-out test tasks.
+4. SQLite and per-run artifact manifests preserve models, seeds, task IDs, scores, and prompt lineage.
+5. Analysis reports absolute and relative improvement per model and in aggregate.
+
+Run the reproducible protocol in [commands.md](commands.md), then inspect the
+generated held-out comparison and analysis plots. Runs with missing baseline or
+test provenance are marked incomplete rather than being assigned an estimated score.
