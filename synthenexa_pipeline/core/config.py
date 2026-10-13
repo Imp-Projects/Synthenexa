@@ -57,6 +57,7 @@ STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "file")
 # SQLAlchemy Base class for ORM models
 class Base(DeclarativeBase):
     """Base class for all SQLAlchemy ORM models."""
+
     pass
 
 
@@ -85,6 +86,14 @@ class EvaluationConfig(BaseModel):
     retries: int = 0
 
 
+class DatasetPartitionConfig(BaseModel):
+    seed: int = 0
+    train_ratio: float = 0.6
+    validation_ratio: float = 0.2
+    test_ratio: float = 0.2
+    evaluate_test_after_selection: bool = True
+
+
 class RLConfig(BaseModel):
     policy_type: str = "greedy"
     epsilon: float = 0.1
@@ -99,6 +108,7 @@ class RLConfig(BaseModel):
 
 class DatabaseConfig(BaseModel):
     """Configuration for the SQLite database file."""
+
     db_path: str = SQLITE_DB_PATH
 
 
@@ -110,6 +120,7 @@ class ExperimentConfig(BaseModel):
     pipeline: PipelineConfig = Field(default_factory=PipelineConfig)
     mutation: MutationConfig = Field(default_factory=MutationConfig)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
+    dataset_partition: DatasetPartitionConfig = Field(default_factory=DatasetPartitionConfig)
     rl: RLConfig = Field(default_factory=RLConfig)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
 
