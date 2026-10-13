@@ -6,14 +6,14 @@ Provides:
   - Session management with context manager
   - Auto-creates the database file and schema on first use
 """
+
 import os
 from contextlib import contextmanager
 from typing import Optional
 
-from sqlalchemy import create_engine, Engine, text
-from sqlalchemy.orm import sessionmaker, Session
-
 from core.config import DatabaseConfig
+from sqlalchemy import Engine, create_engine, text
+from sqlalchemy.orm import Session, sessionmaker
 
 
 class DatabaseManager:
@@ -74,10 +74,15 @@ class DatabaseManager:
         This is idempotent — calling it multiple times is safe.
         Replaces the old Alembic migration step for local development.
         """
-        from core.db_models import (  # noqa: F401 — import to register models
-            Evaluation, Experiment, Prompt, RunLog, Snapshot,
-        )
         from core.config import Base
+        from core.db_models import (  # noqa: F401 — import to register models
+            Evaluation,
+            Experiment,
+            Prompt,
+            RunLog,
+            Snapshot,
+        )
+
         Base.metadata.create_all(self._engine)
         self._apply_sqlite_compat_migrations()
 
@@ -86,6 +91,9 @@ class DatabaseManager:
         column_defs = {
             "evaluations": {
                 "evaluator_model": "VARCHAR(255)",
+                "is_base": "BOOLEAN DEFAULT 0",
+                "dataset_split": "VARCHAR(50) DEFAULT 'all'",
+                "task_ids": "JSON",
                 "total_time_ms": "FLOAT DEFAULT 0.0",
                 "min_time_ms": "FLOAT DEFAULT 0.0",
                 "max_time_ms": "FLOAT DEFAULT 0.0",
@@ -100,16 +108,11 @@ class DatabaseManager:
 
         with self.engine.begin() as connection:
             for table_name, columns in column_defs.items():
-                existing = {
-                    row[1]
-                    for row in connection.execute(text(f"PRAGMA table_info({table_name})")).fetchall()
-                }
+                existing = {row[1] for row in connection.execute(text(f"PRAGMA table_info({table_name})")).fetchall()}
                 for column_name, column_type in columns.items():
                     if column_name in existing:
                         continue
-                    connection.execute(
-                        text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
-                    )
+                    connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}"))
 
     @property
     def engine(self) -> Engine:
