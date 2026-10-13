@@ -8,7 +8,7 @@ from statistics import median
 from typing import Any, Optional
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -439,8 +439,9 @@ async def read_root(request: Request):
     exp_dir = _latest_experiment_dir(ARTIFACTS_DIR)
     if exp_dir is None:
         return templates.TemplateResponse(
-            "index.html",
-            {"request": request, "summary": None, "charts_by_category": {}, "message": "No experiment artifacts found yet."},
+            request=request,
+            name="index.html",
+            context={"summary": None, "charts_by_category": {}, "message": "No experiment artifacts found yet."},
         )
 
     summary = _build_summary(exp_dir)
@@ -449,14 +450,20 @@ async def read_root(request: Request):
     for card in cards:
         charts_by_category[card.category].append(asdict(card))
     return templates.TemplateResponse(
-        "index.html",
-        {
-            "request": request,
+        request=request,
+        name="index.html",
+        context={
             "summary": summary,
             "charts_by_category": dict(charts_by_category),
             "message": None,
         },
     )
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> Response:
+    """Avoid noisy 404s when browsers request their default favicon."""
+    return Response(status_code=204)
 
 
 if __name__ == "__main__":
