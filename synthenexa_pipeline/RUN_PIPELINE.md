@@ -36,7 +36,7 @@ You can customize the pipeline run using several flags:
 - `--mutations <int>`: How many new prompt variations to generate per cycle (Default: 5).
 - `--models <list>`: Comma-separated list of models to use for the primary ensemble workflow.
 - `--ensemble`: Enables cross-model prompt refinement, which is the core project objective.
-- `--ensemble-strategy <name>`: How scores are combined across models. Use `mean`, `min`, `median`, `max`, or `vote`.
+- `--ensemble-strategy <name>`: How scores are combined across models. Use `mean`, `min`, `median`, `max`, `vote`, or `robust` (70% mean + 30% weakest-model score).
 - `--model <name>`: Single-model development smoke test mode. Useful for debugging one provider, but not the main workflow.
 - `--policy <name>`: How the pipeline selects the next prompt. Use `greedy` to always pick the highest score, or `epsilon_greedy` to occasionally explore random prompts (Default: `greedy`).
 
