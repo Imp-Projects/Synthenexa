@@ -1,75 +1,100 @@
-# Setup & Testing
+# Synthenexa Essential Commands
 
-## Activate virtual environment
+Synthenexa is currently operated as an Ollama-only prototype. The normal workflow is:
+
+```text
+run optimization → generate analysis → generate final report → inspect dashboard
+```
+
+Run commands from the repository root unless noted otherwise.
+
+## Setup and tests
+
 ```bash
 source .venv/bin/activate
-```
-
-## Unit tests (Fast)
-```bash
-pytest -q tests/services/test_llm_factory.py tests/services/test_llm_service.py tests/services/test_ollama_adapter.py tests/pipeline/test_pipeline_model_switching.py
-```
-
-## Full test suite
-```bash
 pytest -q
 ```
 
----
+The full test suite does not contact Ollama.
 
-# Pipeline Execution Commands
+## 1. Run the Ollama ensemble
 
-## Primary Workflow: Cross-Model Ensemble Evaluation
+Use an explicit model list so the experiment is reproducible and does not accidentally select unsupported providers.
 
-Synthenexa is designed to refine prompts by testing them across multiple LLMs. The commands below reflect the main workflow of the project: generate prompt variants, cross-evaluate them across models, and select prompts that generalise well.
-
-### Interactive model selection
 ```bash
-python synthenexa_pipeline/scripts/run_optimization.py --interactive --ensemble --generations 1 --mutations 5 --experiment interactive_ensemble_smoke
+cd /workspaces/Synthenexa/synthenexa_pipeline
+python scripts/run_optimization.py \
+  --ensemble \
+  --models "nemotron-3-ultra:cloud,gpt-oss:120b-cloud,neeoggl/glm-5.2:latest" \
+  --generations 3 \
+  --mutations 3 \
+  --policy greedy \
+  --ensemble-strategy robust \
+  --dataset Dataset/benchmark_mbpp_micro.jsonl \
+  --seed 0 \
+  --max-llm-calls 1000 \
+  --storage file \
+  --experiment <experiment_name>
 ```
 
-### Explicit multi-model ensemble run
+For the budget-conscious Phase 8 tuning run, use only
+`nemotron-3-ultra:cloud,gpt-oss:120b-cloud` and set
+`--max-llm-calls 500`. Confirm the validation result before adding
+`neeoggl/glm-5.2:latest` for the three-model confirmation run.
+
+The prototype intentionally limits runs to a maximum of three generations and five mutations per generation.
+
+For a cheaper two-model run, omit the third model from `--models`.
+
+## 2. Generate structured analysis
+
 ```bash
-python synthenexa_pipeline/scripts/run_optimization.py --models qwen3-coder-next:cloud,nemotron-3-super:cloud --ensemble --ensemble-strategy mean --generations 3 --mutations 5 --experiment explicit_ensemble_run
+cd /workspaces/Synthenexa/synthenexa_pipeline
+python Analysis/generate_analysis.py --experiment <experiment_name> --source artifacts
 ```
 
-### Ensemble run with OpenAI + Gemini + local models
+This creates organized charts and `summary.json`, including reward progression, cross-model robustness, model comparisons, error summaries, and the strict held-out comparison.
+
+## 3. Generate the final report assets
+
 ```bash
-python synthenexa_pipeline/scripts/run_optimization.py --available-models --ensemble --ensemble-strategy mean --generations 3 --mutations 5 --experiment available_models_ensemble
+cd /workspaces/Synthenexa/synthenexa_pipeline
+python scripts/generate_final_report.py --experiment <experiment_name>
 ```
 
-### Ensemble run with a different dataset
+This creates `consolidated_comparison.png`, `improvement_summary.png`, and `comparison_table.md`.
+
+## 4. Generate the four-panel impact dashboard
+
+The recommended artifact-native dashboard reads the `summary.json` produced by the previous step. It uses the strict held-out comparison and performs no database import or live model call:
+
 ```bash
-python synthenexa_pipeline/scripts/run_optimization.py --interactive --ensemble --dataset Dataset/benchmark_mbpp_micro.jsonl --generations 2 --mutations 3 --experiment dataset_ensemble_smoke
+cd /workspaces/Synthenexa/synthenexa_pipeline
+python Analysis/generate_impact_dashboard.py --experiment <experiment_name>
 ```
 
-> [!NOTE]
-> The commands above constitute the primary workflow for prompt refinement using an ensemble of LLMs.
+This creates `Analysis/output/<experiment_name>/impact_dashboard.png`. Keep `compare_baseline.py` only for legacy SQLite-backed experiments.
 
----
+## 5. Run the FastAPI results viewer
 
-## Development Smoke Tests
-
-Single-model runs are useful for validating the pipeline, debugging one provider, or checking a small change quickly. They are not the project’s core workflow, but they are helpful during development.
-
-### Single-model smoke test
 ```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model qwen3-coder-next:cloud --generations 1 --mutations 1 --experiment single_model_smoke
+cd /workspaces/Synthenexa
+PYTHONPATH=/workspaces/Synthenexa/synthenexa_pipeline \
+uvicorn synthenexa_pipeline.api:app --host 0.0.0.0 --port 8000
 ```
 
-### OpenAI provider smoke test
+Open `http://localhost:8000/` in a browser.
+
+## Optional inspection
+
 ```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model openai:gpt-4o-mini --generations 1 --mutations 1 --experiment openai_smoke
+cd /workspaces/Synthenexa/synthenexa_pipeline
+python scripts/inspect_experiments.py --storage file list
 ```
 
-### Gemini provider smoke test
-```bash
-python synthenexa_pipeline/scripts/run_optimization.py --model gemini:gemini-2.0-flash --generations 1 --mutations 1 --experiment gemini_smoke
-```
+The following remain internal or optional:
 
-### Common flag combinations
-- `--generations <N>` – Number of generations per model.
-- `--mutations <N>` – Number of prompt mutations per generation.
-- `--ensemble-strategy mean|min|median|max|vote` – How ensemble outputs are aggregated.
-- `--dataset <path>` – Specify a custom dataset.
-- `--experiment <name>` – Tag the run for tracking.
+- `Analysis/visualize_experiments.py` — legacy SQLite visualizations.
+- `Analysis/import_artifacts.py` — SQLite compatibility/import support.
+- `scripts/run_final_benchmark.py` — repeated benchmark aggregation.
+- `scripts/inspect_experiments.py` — optional diagnostics.
