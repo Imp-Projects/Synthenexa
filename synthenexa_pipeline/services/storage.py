@@ -12,13 +12,14 @@ The backend is selected at construction time via the ``backend=`` kwarg
 
 ``"local"`` is accepted as an alias for ``"file"`` for convenience.
 """
+
 import json
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from core.config import STORAGE_BACKEND
 from core.schema import EvalResult, PromptCandidate
-
 
 # ======================================================================= #
 #  Phase 1 — File-based backend (original behaviour, fully preserved)     #
@@ -64,24 +65,36 @@ class FileStorageBackend:
         """Save candidate prompts for a given generation."""
         data = [p.model_dump() for p in prompts]
         self.save_jsonl(f"prompts_gen_{generation}.jsonl", data)
+        if generation == 0 and any(getattr(prompt, "is_base", False) for prompt in prompts):
+            with open(os.path.join(self.base_dir, "baseline.json"), "w", encoding="utf-8") as handle:
+                json.dump(data, handle, indent=2, ensure_ascii=False, default=str)
 
     def save_evaluations(self, results: List[EvalResult], generation: int) -> None:
         """Save evaluation results for a given generation."""
         data = [r.model_dump() for r in results]
         self.save_jsonl(f"evaluations_gen_{generation}.jsonl", data)
+        if generation == 0 and any(getattr(result, "is_base", False) for result in results):
+            self.save_jsonl("baseline_evaluations.jsonl", data)
+
+    def save_final_test_evaluations(self, results: List[EvalResult]) -> None:
+        """Save evaluations performed after the prompt was frozen."""
+        data = [r.model_dump() for r in results]
+        self.save_jsonl("final_test_evaluations.jsonl", data)
 
     def save_generation_snapshot(self, context: Any, generation: int) -> None:
         """Persist a full generation-state snapshot to a JSON file."""
         snapshot: Dict[str, Any] = {
-            "generation":       generation,
-            "best_score":       context.best_score,
-            "best_prompt_id":   context.best_prompt.id if context.best_prompt else None,
+            "generation": generation,
+            "best_score": context.best_score,
+            "best_prompt_id": context.best_prompt.id if context.best_prompt else None,
             "best_prompt_text": context.best_prompt.text if context.best_prompt else None,
-            "scores":           context.scores,
-            "reward_history":   context.reward_history,
+            "scores": context.scores,
+            "reward_history": context.reward_history,
             "best_ensemble_scores": context.best_ensemble_scores,
             "model_leaderboard": context.model_leaderboard,
-            "ensemble_scores":   context.ensemble_scores,
+            "ensemble_scores": context.ensemble_scores,
+            "ensemble_score_summary": getattr(context, "ensemble_score_summary", {}),
+            "call_stats": context.call_stats,
         }
         path = os.path.join(self.base_dir, f"snapshot_gen_{generation}.json")
         with open(path, "w", encoding="utf-8") as f:
@@ -91,9 +104,20 @@ class FileStorageBackend:
         """Append a single log entry to the run log."""
         self.save_jsonl("run_logs.jsonl", [log_entry])
 
+    def update_run_metadata(self, metadata: Dict[str, Any]) -> None:
+        path = os.path.join(self.base_dir, "manifest.json")
+        if not os.path.exists(path):
+            return
+        with open(path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        manifest.update(metadata)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2, ensure_ascii=False, default=str)
+
     # Lifecycle no-ops (file backend needs no experiment record)
-    def create_experiment_record(self, run_id: str, model_name: str,
-                                  experiment_name: str, config_dict: Dict[str, Any]) -> None:
+    def create_experiment_record(
+        self, run_id: str, model_name: str, experiment_name: str, config_dict: Dict[str, Any]
+    ) -> None:
         """No-op for the file backend."""
 
     def finalize_experiment(self, best_prompt: Optional[Any], best_score: float) -> None:
@@ -110,8 +134,10 @@ class SQLiteStorageBackend:
 
     def __init__(self) -> None:
         # Import lazily so the file backend never requires SQLAlchemy
-        from services.database import get_database_manager
         from core.config import DatabaseConfig
+
+        from services.database import get_database_manager
+
         self._db = get_database_manager(DatabaseConfig())
         # Auto-create tables on first use (replaces Alembic for local SQLite)
         self._db.create_all_tables()
@@ -121,10 +147,12 @@ class SQLiteStorageBackend:
     #  Lifecycle                                                        #
     # ---------------------------------------------------------------- #
 
-    def create_experiment_record(self, run_id: str, model_name: str,
-                                  experiment_name: str, config_dict: Dict[str, Any]) -> None:
+    def create_experiment_record(
+        self, run_id: str, model_name: str, experiment_name: str, config_dict: Dict[str, Any]
+    ) -> None:
         """Insert an Experiment row and store its PK for subsequent saves."""
         from core.db_models import Experiment
+
         with self._db.get_session() as session:
             experiment = Experiment(
                 run_id=run_id,
@@ -143,6 +171,7 @@ class SQLiteStorageBackend:
         if self._experiment_id is None:
             return
         from core.db_models import Experiment, Prompt
+
         with self._db.get_session() as session:
             experiment = session.get(Experiment, self._experiment_id)
             if experiment:
@@ -150,13 +179,23 @@ class SQLiteStorageBackend:
             if best_prompt is not None:
                 # Mark the best prompt row
                 best_row = (
-                    session.query(Prompt)
-                    .filter_by(experiment_id=self._experiment_id, prompt_id=best_prompt.id)
-                    .first()
+                    session.query(Prompt).filter_by(experiment_id=self._experiment_id, prompt_id=best_prompt.id).first()
                 )
                 if best_row:
                     best_row.is_best = True
         print(f"[storage/sqlite] Experiment {self._experiment_id} finalised (best_score={best_score:.4f})")
+
+    def update_run_metadata(self, metadata: Dict[str, Any]) -> None:
+        if self._experiment_id is None:
+            return
+        from core.db_models import Experiment
+
+        with self._db.get_session() as session:
+            experiment = session.get(Experiment, self._experiment_id)
+            if experiment:
+                config = dict(experiment.config or {})
+                config.update(metadata)
+                experiment.config = config
 
     # ---------------------------------------------------------------- #
     #  Domain-specific save methods (public API)                        #
@@ -167,67 +206,87 @@ class SQLiteStorageBackend:
         if self._experiment_id is None:
             raise RuntimeError("call create_experiment_record() before saving data")
         from core.db_models import Prompt
+
         with self._db.get_session() as session:
             for p in prompts:
-                session.add(Prompt(
-                    prompt_id=p.id,
-                    experiment_id=self._experiment_id,
-                    generation=generation,
-                    text=p.text,
-                ))
+                session.add(
+                    Prompt(
+                        prompt_id=p.id,
+                        experiment_id=self._experiment_id,
+                        generation=generation,
+                        text=p.text,
+                        is_base=getattr(p, "is_base", False),
+                    )
+                )
 
     def save_evaluations(self, results: List[EvalResult], generation: int) -> None:
         """Insert Evaluation rows for a given generation."""
         if self._experiment_id is None:
             raise RuntimeError("call create_experiment_record() before saving data")
         from core.db_models import Evaluation
+
         with self._db.get_session() as session:
             for r in results:
-                session.add(Evaluation(
-                    prompt_id=r.prompt_id,
-                    experiment_id=self._experiment_id,
-                    generation=generation,
-                    evaluator_model=getattr(r, "evaluator_model", "") or None,
-                    passed=r.passed,
-                    failed=r.failed,
-                    total=r.total,
-                    syntax_errors=getattr(r, "syntax_errors", 0),
-                    errors=getattr(r, "errors", None),
-                    total_time_ms=getattr(r, "total_time_ms", 0.0),
-                    min_time_ms=getattr(r, "min_time_ms", 0.0),
-                    max_time_ms=getattr(r, "max_time_ms", 0.0),
-                    avg_time_ms=getattr(r, "avg_time_ms", 0.0),
-                ))
+                session.add(
+                    Evaluation(
+                        prompt_id=r.prompt_id,
+                        experiment_id=self._experiment_id,
+                        generation=generation,
+                        evaluator_model=getattr(r, "evaluator_model", "") or None,
+                        is_base=getattr(r, "is_base", False),
+                        dataset_split=getattr(r, "dataset_split", "all"),
+                        task_ids=getattr(r, "task_ids", []),
+                        passed=r.passed,
+                        failed=r.failed,
+                        total=r.total,
+                        syntax_errors=getattr(r, "syntax_errors", 0),
+                        errors=getattr(r, "errors", None),
+                        total_time_ms=getattr(r, "total_time_ms", 0.0),
+                        min_time_ms=getattr(r, "min_time_ms", 0.0),
+                        max_time_ms=getattr(r, "max_time_ms", 0.0),
+                        avg_time_ms=getattr(r, "avg_time_ms", 0.0),
+                    )
+                )
+
+    def save_final_test_evaluations(self, results: List[EvalResult]) -> None:
+        """Store held-out evaluations separately from optimization generations."""
+        self.save_evaluations(results, generation=-1)
 
     def save_generation_snapshot(self, context: Any, generation: int) -> None:
         """Insert a Snapshot row for a given generation."""
         if self._experiment_id is None:
             raise RuntimeError("call create_experiment_record() before saving data")
         from core.db_models import Snapshot
+
         with self._db.get_session() as session:
-            session.add(Snapshot(
-                experiment_id=self._experiment_id,
-                generation=generation,
-                best_score=context.best_score,
-                best_prompt_id=context.best_prompt.id if context.best_prompt else None,
-                best_prompt_text=context.best_prompt.text if context.best_prompt else None,
-                scores=context.scores,
-                reward_history=context.reward_history,
-                best_ensemble_scores=context.best_ensemble_scores,
-                model_leaderboard=context.model_leaderboard,
-                ensemble_scores=context.ensemble_scores,
-            ))
+            session.add(
+                Snapshot(
+                    experiment_id=self._experiment_id,
+                    generation=generation,
+                    best_score=context.best_score,
+                    best_prompt_id=context.best_prompt.id if context.best_prompt else None,
+                    best_prompt_text=context.best_prompt.text if context.best_prompt else None,
+                    scores=context.scores,
+                    reward_history=context.reward_history,
+                    best_ensemble_scores=context.best_ensemble_scores,
+                    model_leaderboard=context.model_leaderboard,
+                    ensemble_scores=context.ensemble_scores,
+                )
+            )
 
     def save_run_log(self, log_entry: Dict[str, Any]) -> None:
         """Insert a RunLog row."""
         if self._experiment_id is None:
             raise RuntimeError("call create_experiment_record() before saving data")
         from core.db_models import RunLog
+
         with self._db.get_session() as session:
-            session.add(RunLog(
-                experiment_id=self._experiment_id,
-                log_entry=log_entry,
-            ))
+            session.add(
+                RunLog(
+                    experiment_id=self._experiment_id,
+                    log_entry=log_entry,
+                )
+            )
 
 
 # ======================================================================= #
@@ -272,6 +331,8 @@ class StorageService:
         backend: Optional[str] = None,
     ) -> None:
         resolved = (backend or STORAGE_BACKEND).lower()
+        self.base_dir = base_dir
+        self.backend_name = "sqlite" if resolved == "sqlite" else "file"
         if resolved == "sqlite":
             self._backend: Any = SQLiteStorageBackend()
             print("[storage] Using SQLite backend.")
@@ -292,8 +353,23 @@ class StorageService:
         experiment_name: str,
         config_dict: Dict[str, Any],
     ) -> None:
-        """Create a DB experiment record (sqlite) or do nothing (file/local)."""
+        """Reserve the artifact directory and create the backend experiment record."""
+        os.makedirs(self.base_dir, exist_ok=True)
+        existing = os.listdir(self.base_dir)
+        if existing:
+            raise FileExistsError(f"Experiment artifact directory is not empty; refusing to reuse it: {self.base_dir}")
         self._backend.create_experiment_record(run_id, model_name, experiment_name, config_dict)
+        manifest = {
+            "run_id": run_id,
+            "experiment_name": experiment_name,
+            "model_name": model_name,
+            "storage_backend": self.backend_name,
+            "artifact_directory": os.path.abspath(self.base_dir),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "config": config_dict,
+        }
+        with open(os.path.join(self.base_dir, "manifest.json"), "x", encoding="utf-8") as handle:
+            json.dump(manifest, handle, indent=2, ensure_ascii=False, default=str)
 
     def finalize_experiment(
         self,
@@ -302,6 +378,9 @@ class StorageService:
     ) -> None:
         """Finalise the experiment record (sqlite) or do nothing (file/local)."""
         self._backend.finalize_experiment(best_prompt, best_score)
+
+    def update_run_metadata(self, metadata: Dict[str, Any]) -> None:
+        self._backend.update_run_metadata(metadata)
 
     # ---------------------------------------------------------------- #
     #  Public save API (identical for both backends)                    #
@@ -314,6 +393,10 @@ class StorageService:
     def save_evaluations(self, results: List[EvalResult], generation: int) -> None:
         """Save evaluation results for a given generation."""
         self._backend.save_evaluations(results, generation)
+
+    def save_final_test_evaluations(self, results: List[EvalResult]) -> None:
+        """Persist held-out evaluations after the winner is frozen."""
+        self._backend.save_final_test_evaluations(results)
 
     def save_generation_snapshot(self, context: Any, generation: int) -> None:
         """Persist a full generation-state snapshot."""
